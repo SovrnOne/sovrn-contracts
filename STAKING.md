@@ -10,8 +10,8 @@ vault. This contract lets SVO stakers share Solomon's overflow, and holds the fo
 | Staked and matched token | SVO (`SovrnToken`), immutable constructor argument |
 | Reward token | IMD (constructor argument `rewardToken`) |
 | Rewards source | Solomon's overflow: IMD the refuel Safe withdraws from the vault's inference reserve above the "full health" level and sends here |
-| Stream | `notify()` (anyone) streams all IMD not yet accounted over `REWARD_PERIOD` (7 days), pro rata by stake, per second. While a stream is running it only accepts new IMD worth at least a tenth of what is left, so nobody can stretch the payout for free; smaller deposits wait and are streamed once the threshold is met or the stream ends |
-| Burn-match pool | `fund(amount)`, once, only by the `funder` set at deploy (the founder's SVO, up to 10% of supply); vests linearly over `MATCH_DURATION` (365 days) |
+| Stream | `notify()` (anyone) streams all IMD not yet accounted over `REWARD_PERIOD` (7 days), pro rata by stake, per second. While a stream is running it only accepts new IMD worth at least a tenth of what is left, so nobody can stretch the payout for free; smaller deposits wait and are streamed once the threshold is met or the stream ends. A restart re-spreads what is left plus the new IMD over a fresh week, so the per-second rate can fall; whoever's IMD is waiting pays the threshold, and anyone may trigger it once it is met. One stream is capped at `MAX_STREAM` (1e40 wei) so a hostile reward token cannot overflow the reward math |
+| Burn-match pool | `fund(amount)`, once, only by the `funder` set at deploy (the founder's SVO; the contract accepts between `MIN_FUND` = 1,000,000 SVO and a tenth of the supply, so a wrong-unit amount cannot use up the one-time deposit); vests linearly over `MATCH_DURATION` (365 days) |
 | Access tier | `hasAccess(a)`: at least `MIN_STAKE` (1,000,000 SVO) staked and the stake at least `MIN_STAKE_AGE` (1 day) old |
 | Admin | none: no owner, no pause, no upgrade. The one funder power is `reclaim()` (below) |
 
@@ -69,6 +69,15 @@ Reviews so far, all single-reviewer AI reviews, none a substitute for an indepen
 - Accepted: a burn just before `reclaim()` makes the pool burn that much first, at an equal cost to the burner; with nothing
   else staked a staker of any size earns the whole stream; the same SVO can rotate across accounts to rent the access tier
   at about one new account per day; reward accounting assumes an 18-decimal IMD.
+
+- 2026-10-10, IMD swarm audit of `6a980ca` (job `27aae9c4-e0db-4a83-b551-903d307b3205`: four specialists and a judge): no
+  critical, high or medium findings; 3 low and 7 info, all reproduced. Acted on: `notify()` now rejects a stream above
+  `MAX_STREAM` (a reward token reporting an absurd balance could otherwise overflow the reward math and lock `unstake`;
+  unreachable with the real IMD); `fund()` now accepts only `MIN_FUND` to a tenth of the supply; `DeployStaking` pins the
+  chain, the SVO and IMD addresses and the founder Safe (override only with `ALLOW_OTHER_FUNDER=true`) and refuses a
+  `FUND_AMOUNT` below `MIN_FUND`; NatSpec now says `reclaim()` withdraws and that `notify()` restarts; `RewardAdded.streamed`
+  now reports what is actually streamed; `Staked`/`Unstaked` use `accountTotal`. **These last fixes were tested (222 tests,
+  plus a dry run against the live chain) but not re-audited.**
 
 ## Known properties
 - Rewards depend on how much surplus exists. They can be zero, and the share per staked SVO falls as more is staked.

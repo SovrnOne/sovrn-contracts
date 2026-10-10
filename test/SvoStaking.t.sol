@@ -379,4 +379,71 @@ contract SvoStakingTest is Test {
         vm.expectRevert(SvoStaking.Unauthorized.selector);
         new SvoStaking(svo, address(svo), address(this));
     }
+
+    // ------------------------------------------------------------ swarm audit fixes (2026-10-10)
+
+    function test_hostileRewardBalanceCannotOverflowTheRewardMathOrLockPrincipal() public {
+        HugeBalanceIMD hostile = new HugeBalanceIMD();
+        SvoStaking s2 = new SvoStaking(svo, address(hostile), address(this));
+        vm.prank(alice);
+        svo.approve(address(s2), type(uint256).max);
+        vm.prank(alice);
+        s2.stake(5_000_000 ether);
+        hostile.setFake(1e66);
+        vm.expectRevert(SvoStaking.InvalidAmount.selector);
+        s2.notify(); // refused: nothing is recorded, the reward math is never exposed to the absurd number
+        skip(1);
+        uint256 before = svo.balanceOf(alice);
+        vm.prank(alice);
+        s2.unstake(5_000_000 ether);
+        assertEq(svo.balanceOf(alice) - before, 5_000_000 ether);
+    }
+
+    function test_streamCapIsFarBelowTheOverflowPoint() public view {
+        // emitted <= MAX_STREAM and the accumulator multiplies by 1e18: stays below 2^256
+        assertLt(s.MAX_STREAM() * 1e18, type(uint256).max);
+    }
+
+    function test_fundRejectsDustAndMoreThanATenthOfSupply() public {
+        svo.approve(address(s), type(uint256).max);
+        uint256 tenth = svo.totalSupply() / 10;
+        uint256 floorAmt = s.MIN_FUND();
+        vm.expectRevert(SvoStaking.InvalidAmount.selector);
+        s.fund(100_000_000); // whole tokens typed as wei: 1e-10 SVO
+        vm.expectRevert(SvoStaking.InvalidAmount.selector);
+        s.fund(31_536_000); // the old floor
+        vm.expectRevert(SvoStaking.InvalidAmount.selector);
+        s.fund(floorAmt - 1);
+        vm.expectRevert(SvoStaking.InvalidAmount.selector);
+        s.fund(tenth + 1);
+        assertEq(s.matchStart(), 0); // the one-time slot is still unused
+        s.fund(floorAmt); // boundaries are accepted
+        assertEq(s.matchTotal(), 1_000_000 ether);
+    }
+
+    function test_fundAcceptsExactlyATenthOfSupply() public {
+        svo.approve(address(s), type(uint256).max);
+        s.fund(svo.totalSupply() / 10);
+        assertEq(s.matchTotal(), 100_000_000 ether);
+    }
+
+    function test_rewardAddedReportsWhatIsActuallyStreamed() public {
+        vm.prank(alice);
+        s.stake(1_000_000 ether);
+        imd.transfer(address(s), 700 ether);
+        uint256 rate = 700 ether / WEEK;
+        vm.expectEmit(false, false, false, true);
+        emit SvoStaking.RewardAdded(700 ether, rate * WEEK, rate, block.timestamp + WEEK);
+        s.notify();
+        assertLt(rate * WEEK, 700 ether); // the dust is carried, not streamed
+        assertEq(s.undistributed(), 700 ether - rate * WEEK);
+    }
+}
+
+/// Reward token that reports whatever balance it is told to (hostile, compromised or buggy).
+contract HugeBalanceIMD {
+    uint256 public fake;
+    function setFake(uint256 f) external { fake = f; }
+    function balanceOf(address) external view returns (uint256) { return fake; }
+    function transfer(address, uint256) external pure returns (bool) { return true; }
 }

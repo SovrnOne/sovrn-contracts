@@ -10,22 +10,23 @@ import {DeployStaking} from "../script/DeployStaking.s.sol";
 ///   FORK_4663_RPC=https://rpc.mainnet.chain.robinhood.com forge test --match-contract StakingFork -vv
 contract DeployStakingTest is Test {
     address constant IMD = 0x5F7Bb59365ce557C26dbcAa4EE9d39A4b95B7127;
-    SovrnToken svo;
+    address constant SVO = 0x7f7e9b8e9f754c3076e514852552019CB571461b; // pinned in the script
+    address constant SAFE = 0x589A639529220f66a2661A41753e3fd432f48DA0; // pinned funder
+    SovrnToken svo = SovrnToken(SVO);
     DeployStaking script;
 
     function setUp() public {
         vm.chainId(4663);
-        svo = new SovrnToken();
-        svo.transfer(DEFAULT_SENDER, 200_000_000 ether); // scripts broadcast from Foundry's default sender
+        vm.etch(SVO, address(new SovrnToken()).code); // the real SVO address, with stand-in code
         vm.etch(IMD, address(new SovrnToken()).code);
-        vm.setEnv("SVO_TOKEN", vm.toString(address(svo)));
-        vm.setEnv("STAKING_FUNDER", vm.toString(DEFAULT_SENDER));
+        deal(SVO, DEFAULT_SENDER, 200_000_000 ether); // scripts broadcast from Foundry's default sender
+        vm.setEnv("STAKING_FUNDER", vm.toString(SAFE));
         script = new DeployStaking();
     }
 
     /// One test on purpose: the script reads process env vars, which parallel tests would overwrite.
     function test_deployFundAndGuards() public {
-        // wrong chain is refused by both steps
+        // wrong chain is refused by both steps (the chain is pinned, not read from the environment)
         vm.chainId(1);
         vm.expectRevert(bytes("wrong chain"));
         script.run();
@@ -33,15 +34,32 @@ contract DeployStakingTest is Test {
         script.fund();
         vm.chainId(4663);
 
-        // the funder has no default
+        // a token that is not the real SVO address is refused: the script no longer reads the token from env
+        vm.etch(SVO, "");
+        vm.expectRevert(bytes("SVO has no code on this chain"));
+        script.run();
+        vm.etch(SVO, address(new SovrnToken()).code);
+        deal(SVO, DEFAULT_SENDER, 200_000_000 ether);
+
+        // the funder has no default, and only the founder Safe is accepted unless explicitly overridden
         vm.setEnv("STAKING_FUNDER", "");
         vm.expectRevert();
         script.run();
         vm.setEnv("STAKING_FUNDER", vm.toString(DEFAULT_SENDER));
+        vm.expectRevert(bytes("funder is not the founder Safe"));
+        script.run();
 
+        // the real deployment shape: funder = the Safe
+        vm.setEnv("STAKING_FUNDER", vm.toString(SAFE));
+        SvoStaking real = script.run();
+        assertEq(address(real.token()), SVO);
+        assertEq(real.rewardToken(), IMD);
+        assertEq(real.funder(), SAFE);
+
+        // rehearsal with an EOA funder, to exercise fund(): needs the explicit override
+        vm.setEnv("ALLOW_OTHER_FUNDER", "true");
+        vm.setEnv("STAKING_FUNDER", vm.toString(DEFAULT_SENDER));
         SvoStaking s = script.run();
-        assertEq(address(s.token()), address(svo));
-        assertEq(s.rewardToken(), IMD);
         assertEq(s.funder(), DEFAULT_SENDER);
         assertEq(s.matchStart(), 0);
 
@@ -56,14 +74,19 @@ contract DeployStakingTest is Test {
         script.fund();
         vm.setEnv("STAKING_CONTRACT", vm.toString(address(s)));
 
+        // an amount that looks like whole tokens typed as wei is refused before anything is signed
+        vm.setEnv("FUND_AMOUNT", "100000000");
+        vm.expectRevert(bytes("FUND_AMOUNT is below 1,000,000 SVO: is it written in wei?"));
+        script.fund();
+
         // a funder that holds too little is refused before anything moves
-        vm.setEnv("STAKING_CONTRACT", vm.toString(address(s)));
-        vm.setEnv("FUND_AMOUNT", "1000000000000000000000000000"); // 1B: more than the funder holds
+        vm.setEnv("FUND_AMOUNT", "100000000000000000000000000");
+        deal(SVO, DEFAULT_SENDER, 1 ether);
         vm.expectRevert(bytes("funder holds less than FUND_AMOUNT"));
         script.fund();
         vm.stopBroadcast(); // a revert inside a script leaves the broadcast open in a test (a real run just aborts)
+        deal(SVO, DEFAULT_SENDER, 200_000_000 ether);
 
-        vm.setEnv("FUND_AMOUNT", "100000000000000000000000000");
         script.fund();
         assertEq(s.matchTotal(), 100_000_000 ether);
         assertEq(svo.balanceOf(address(s)), 100_000_000 ether);

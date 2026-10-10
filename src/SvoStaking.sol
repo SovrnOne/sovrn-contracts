@@ -6,7 +6,8 @@ import {Guard} from "./Interfaces.sol";
 
 /// @notice Stake SVO to share Solomon's overflow, and to unlock the 30-minute session tier. The founder allocation
 ///         of SVO sits here as a burn-match pool that burns the same SVO again whenever SVO is burned.
-/// @dev No owner, no upgrade path, no withdraw of the pools.
+/// @dev No owner and no upgrade path. SVO leaves the contract only to a staker (unstake), to DEAD (matchBurn), or back
+///      to the funder as the one-time reclaim() of the unmatched burn-match pool after MATCH_DURATION.
 ///
 ///      Rewards (IMD). When Solomon's health is full, the refuel Safe sends the surplus IMD from the LifeForceVault
 ///      to this contract. Anyone then calls `notify()`, which streams everything not yet accounted over
@@ -30,6 +31,12 @@ contract SvoStaking is Guard {
     uint256 public constant MATCH_DURATION = 365 days;
     uint256 public constant MIN_STAKE = 1_000_000 ether; // 0.1% of supply, for the 30-minute tier
     uint256 public constant MIN_STAKE_AGE = 1 days;
+    /// @dev fund() takes between this and a tenth of the supply. The floor stops a wrong-unit amount (whole tokens typed as
+    ///      wei) from using up the one-time deposit on dust.
+    uint256 public constant MIN_FUND = 1_000_000 ether;
+    /// @dev Upper bound on one stream. Reward math multiplies by 1e18, so anything near 2^256 / 1e18 would overflow and
+    ///      lock every stake action; 1e40 wei (1e22 tokens) is far above any real IMD amount and far below that.
+    uint256 public constant MAX_STREAM = 1e40;
     uint256 private constant PRECISION = 1e18;
 
     SovrnToken public immutable token; // staked and matched
@@ -60,10 +67,10 @@ contract SvoStaking is Guard {
     bool public reclaimed;
     uint256 private burnSnapshot; // token.totalBurned() less burns already matched or made by this contract
 
-    event Staked(address indexed account, uint256 amount, uint256 total);
-    event Unstaked(address indexed account, uint256 amount, uint256 total);
+    event Staked(address indexed account, uint256 amount, uint256 accountTotal);
+    event Unstaked(address indexed account, uint256 amount, uint256 accountTotal);
     event Claimed(address indexed account, uint256 amount);
-    event RewardAdded(uint256 added, uint256 streamed, uint256 rate, uint256 periodFinish);
+    event RewardAdded(uint256 added, uint256 streamed, uint256 rate, uint256 periodFinish); // streamed = rate * REWARD_PERIOD; rounding dust is carried
     event Funded(uint256 amount, uint256 start);
     event Reclaimed(address indexed funder, uint256 amount);
     event MatchBurned(address indexed caller, uint256 observed, uint256 matched, uint256 matchRemaining);
@@ -122,7 +129,8 @@ contract SvoStaking is Guard {
 
     // ---------------------------------------------------------------- rewards
 
-    /// @notice Start (or extend) the stream with IMD that has arrived since the last call. Anyone may call.
+    /// @notice Start the stream, or restart it over a fresh REWARD_PERIOD with what is left plus the new IMD (the rate can
+    ///         fall). Streams IMD that has arrived since the last call. Anyone may call.
     ///         While a stream is running, only when the new IMD is at least a tenth of what is left to stream;
     ///         smaller amounts wait (nothing is lost) until that is met or the stream ends. Also restarts
     ///         emission that rolled over while nothing was staked.
@@ -140,11 +148,12 @@ contract SvoStaking is Guard {
         if (leftover != 0 && (added == 0 || added < leftover / 10)) revert InvalidAmount();
         uint256 total = added + leftover + undistributed;
         if (total < REWARD_PERIOD) revert InvalidAmount(); // would stream at less than 1 wei per second
+        if (total > MAX_STREAM) revert InvalidAmount(); // a hostile reward token must not be able to overflow the reward math
         rewardRate = total / REWARD_PERIOD;
         undistributed = total - rewardRate * REWARD_PERIOD; // rounding dust rolls forward
         lastUpdate = block.timestamp;
         periodFinish = block.timestamp + REWARD_PERIOD;
-        emit RewardAdded(added, total, rewardRate, periodFinish);
+        emit RewardAdded(added, rewardRate * REWARD_PERIOD, rewardRate, periodFinish);
     }
 
     // ---------------------------------------------------------------- burn-match
@@ -153,7 +162,7 @@ contract SvoStaking is Guard {
     function fund(uint256 amount) external nonReentrant {
         if (msg.sender != funder) revert Unauthorized();
         if (matchStart != 0) revert AlreadyFunded();
-        if (amount < MATCH_DURATION) revert InvalidAmount();
+        if (amount < MIN_FUND || amount > token.totalSupply() / 10) revert InvalidAmount();
         if (!token.transferFrom(msg.sender, address(this), amount)) revert TransferFailed();
         matchTotal = amount;
         matchStart = block.timestamp;
