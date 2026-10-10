@@ -4,121 +4,130 @@ import {Test} from "forge-std/Test.sol";
 import {SovrnToken} from "../src/SovrnToken.sol";
 import {SvoStaking} from "../src/SvoStaking.sol";
 
+/// IMD that can be told to refuse transfers, to show it cannot touch stakers' SVO.
+contract BrokenIMD {
+    mapping(address => uint256) public balanceOf;
+    bool public broken;
+    constructor() { balanceOf[msg.sender] = 1e27; }
+    function setBroken(bool b) external { broken = b; }
+    function transfer(address to, uint256 a) external returns (bool) {
+        if (broken) revert("blocked");
+        balanceOf[msg.sender] -= a;
+        balanceOf[to] += a;
+        return true;
+    }
+}
+
 contract SvoStakingTest is Test {
-    SovrnToken t;
+    SovrnToken svo;
+    SovrnToken imd; // a plain 18-decimal ERC-20 stands in for IMD
     SvoStaking s;
     address dead;
     address alice = address(0xA11CE);
     address bob = address(0xB0B);
     uint256 constant POOL = 100_000_000 ether; // 10% of supply
-    uint256 constant YEAR = 365 days;
+    uint256 constant WEEK = 7 days;
 
     function setUp() public {
-        t = new SovrnToken();
-        s = new SvoStaking(t, address(this));
-        dead = t.DEAD();
-        t.transfer(alice, 10_000_000 ether);
-        t.transfer(bob, 10_000_000 ether);
+        svo = new SovrnToken();
+        imd = new SovrnToken();
+        s = new SvoStaking(svo, address(imd), address(this));
+        dead = svo.DEAD();
+        svo.transfer(alice, 10_000_000 ether);
+        svo.transfer(bob, 10_000_000 ether);
         vm.prank(alice);
-        t.approve(address(s), type(uint256).max);
+        svo.approve(address(s), type(uint256).max);
         vm.prank(bob);
-        t.approve(address(s), type(uint256).max);
+        svo.approve(address(s), type(uint256).max);
     }
 
-    function _fund() internal {
-        t.approve(address(s), POOL);
+    /// The Safe sends overflow IMD to the contract; anyone notifies.
+    function _overflow(uint256 amt) internal {
+        imd.transfer(address(s), amt);
+        s.notify();
+    }
+
+    function _fundMatch() internal {
+        svo.approve(address(s), POOL);
         s.fund(POOL);
     }
 
-    // ------------------------------------------------------------ funding
+    // ------------------------------------------------------------ rewards (IMD overflow)
 
-    function test_fundSplitsAndLocksSchedule() public {
-        _fund();
-        assertEq(s.rewardsTotal() + s.matchTotal(), POOL);
-        assertEq(s.rewardsTotal(), s.rewardRate() * YEAR);
-        assertApproxEqAbs(s.rewardsTotal(), 60_000_000 ether, 1 ether); // rate is an integer per second
-        assertEq(t.balanceOf(address(s)), POOL);
-        assertEq(s.periodFinish(), s.start() + YEAR);
-    }
-
-    function test_fundOnlyFunderAndOnlyOnce() public {
-        vm.prank(alice);
-        vm.expectRevert(SvoStaking.Unauthorized.selector);
-        s.fund(POOL);
-        _fund();
-        t.approve(address(s), 1 ether);
-        vm.expectRevert(SvoStaking.AlreadyFunded.selector);
-        s.fund(1 ether);
-    }
-
-    function test_nothingBeforeFunding() public {
-        vm.prank(alice);
-        vm.expectRevert(SvoStaking.NotFunded.selector);
-        s.stake(1 ether);
-        vm.expectRevert(SvoStaking.NotFunded.selector);
-        s.matchBurn();
-    }
-
-    // ------------------------------------------------------------ rewards
-
-    function test_soleStakerEarnsWholeStreamOverYear() public {
-        _fund();
+    function test_overflowStreamsToStakersOverAWeek() public {
         vm.prank(alice);
         s.stake(1_000_000 ether);
-        vm.warp(block.timestamp + YEAR + 10 days);
+        _overflow(700 ether);
+        assertEq(s.unnotified(), 0);
+        skip(WEEK / 2);
+        assertApproxEqAbs(s.pendingRewards(alice), 350 ether, 1e12);
+        skip(WEEK);
         vm.prank(alice);
         uint256 got = s.claim();
-        assertApproxEqAbs(got, s.rewardsTotal(), 1 ether);
-        assertEq(s.rewardsRemaining(), s.rewardsTotal() - got);
-        assertEq(s.skipped(), 0);
+        assertApproxEqAbs(got, 700 ether, 1e12);
+        assertEq(imd.balanceOf(alice), got);
+        assertEq(s.streamRemaining(), 0);
     }
 
-    function test_rewardsSplitProRata() public {
-        _fund();
+    function test_proRataAndLateJoinerOnlyEarnsAfterJoining() public {
         vm.prank(alice);
         s.stake(3_000_000 ether);
+        _overflow(700 ether);
+        skip(WEEK / 2); // alice alone for half the week
         vm.prank(bob);
         s.stake(1_000_000 ether);
-        vm.warp(block.timestamp + 30 days);
-        uint256 a = s.pendingRewards(alice);
-        uint256 b = s.pendingRewards(bob);
-        assertApproxEqRel(a, 3 * b, 1e12);
-        assertApproxEqAbs(a + b, s.rewardRate() * 30 days, 1e6);
+        skip(WEEK);
+        // alice: 350 + 3/4 * 350, bob: 1/4 * 350
+        assertApproxEqAbs(s.pendingRewards(alice), 350 ether + 262.5 ether, 1e12);
+        assertApproxEqAbs(s.pendingRewards(bob), 87.5 ether, 1e12);
     }
 
-    function test_unstakeStopsAccrualAndReturnsPrincipal() public {
-        _fund();
+    function test_secondOverflowExtendsStreamWithoutLosingLeftover() public {
+        vm.prank(alice);
+        s.stake(1_000_000 ether);
+        _overflow(700 ether);
+        skip(WEEK / 2);
+        _overflow(350 ether); // leftover 350 + new 350 over a fresh week
+        skip(WEEK);
+        vm.prank(alice);
+        assertApproxEqAbs(s.claim(), 1050 ether, 1e12);
+    }
+
+    function test_emissionWithNobodyStakedRollsIntoNextStream() public {
+        _overflow(700 ether); // nobody staked
+        skip(WEEK + 1 days);
+        vm.prank(alice);
+        s.stake(1_000_000 ether);
+        assertEq(s.pendingRewards(alice), 0);
+        s.notify(); // restarts the rolled-over IMD
+        skip(WEEK);
+        vm.prank(alice);
+        assertApproxEqAbs(s.claim(), 700 ether, 1e12);
+    }
+
+    function test_notifyRevertsWithNothingToStream() public {
+        vm.expectRevert(SvoStaking.InvalidAmount.selector);
+        s.notify();
+    }
+
+    function test_unstakeStopsAccrualReturnsPrincipalKeepsRewards() public {
         vm.startPrank(alice);
         s.stake(2_000_000 ether);
-        vm.warp(block.timestamp + 10 days);
+        vm.stopPrank();
+        _overflow(700 ether);
+        skip(2 days);
+        vm.startPrank(alice);
         s.unstake(2_000_000 ether);
         uint256 frozen = s.pendingRewards(alice);
-        vm.warp(block.timestamp + 10 days);
+        assertGt(frozen, 0);
+        skip(3 days);
         assertEq(s.pendingRewards(alice), frozen);
-        assertEq(t.balanceOf(alice), 10_000_000 ether);
-        s.claim();
-        assertEq(t.balanceOf(alice), 10_000_000 ether + frozen);
+        assertEq(svo.balanceOf(alice), 10_000_000 ether);
+        assertEq(s.claim(), frozen);
         vm.stopPrank();
     }
 
-    function test_emissionWithNobodyStakedIsBurnedNotPaid() public {
-        _fund();
-        vm.warp(block.timestamp + 10 days);
-        vm.prank(alice);
-        s.stake(1_000_000 ether);
-        assertEq(s.skipped(), s.rewardRate() * 10 days);
-        uint256 amt = s.skipped();
-        s.burnSkipped();
-        assertEq(t.balanceOf(dead), amt);
-        assertEq(s.skipped(), 0);
-        // skipped burn is not external, so it must not be matched
-        assertEq(s.unmatchedBurns(), 0);
-        vm.expectRevert(SvoStaking.InvalidAmount.selector);
-        s.matchBurn();
-    }
-
     function test_cannotUnstakeMoreThanStaked() public {
-        _fund();
         vm.startPrank(alice);
         s.stake(1 ether);
         vm.expectRevert(SvoStaking.InvalidAmount.selector);
@@ -126,114 +135,140 @@ contract SvoStakingTest is Test {
         vm.stopPrank();
     }
 
+    function test_brokenIMDBlocksClaimButNeverPrincipal() public {
+        BrokenIMD bad = new BrokenIMD();
+        SvoStaking s2 = new SvoStaking(svo, address(bad), address(this));
+        vm.prank(alice);
+        svo.approve(address(s2), type(uint256).max);
+        vm.prank(alice);
+        s2.stake(2_000_000 ether);
+        bad.transfer(address(s2), 700 ether);
+        s2.notify();
+        skip(WEEK);
+        bad.setBroken(true);
+        vm.prank(alice);
+        vm.expectRevert(SvoStaking.TransferFailed.selector);
+        s2.claim();
+        vm.prank(alice);
+        s2.unstake(2_000_000 ether); // principal is unaffected
+        assertEq(svo.balanceOf(alice), 10_000_000 ether);
+        bad.setBroken(false);
+        vm.prank(alice);
+        assertApproxEqAbs(s2.claim(), 700 ether, 1e12); // and the rewards are still there
+    }
+
     // ------------------------------------------------------------ access tier
 
     function test_accessNeedsMinStakeAndAge() public {
-        _fund();
         vm.startPrank(alice);
         s.stake(999_999 ether);
-        vm.warp(block.timestamp + 2 days);
-        assertFalse(s.hasAccess(alice)); // under threshold
+        skip(2 days);
+        assertFalse(s.hasAccess(alice));
         s.stake(1 ether);
         assertFalse(s.hasAccess(alice)); // top-up restarts the age
-        vm.warp(block.timestamp + 1 days - 1);
+        skip(1 days - 1);
         assertFalse(s.hasAccess(alice));
-        vm.warp(block.timestamp + 1);
+        skip(1);
         assertTrue(s.hasAccess(alice));
         s.unstake(1 ether);
         assertFalse(s.hasAccess(alice));
         vm.stopPrank();
     }
 
-    // ------------------------------------------------------------ burn-match
+    // ------------------------------------------------------------ funding and burn-match
+
+    function test_fundOnlyFunderAndOnlyOnce() public {
+        vm.prank(alice);
+        vm.expectRevert(SvoStaking.Unauthorized.selector);
+        s.fund(POOL);
+        _fundMatch();
+        assertEq(s.matchTotal(), POOL);
+        svo.approve(address(s), 1 ether);
+        vm.expectRevert(SvoStaking.AlreadyFunded.selector);
+        s.fund(1 ether);
+    }
+
+    function test_matchBurnNeedsFunding() public {
+        vm.expectRevert(SvoStaking.NotFunded.selector);
+        s.matchBurn();
+    }
 
     function test_matchBurnMatchesExternalBurnsUpToVested() public {
-        _fund();
-        uint256 mp = s.matchTotal();
-        vm.warp(block.timestamp + 100 days);
-        uint256 vested = s.matchAvailable();
-        assertEq(vested, mp * 100 days / YEAR);
-
+        _fundMatch();
+        skip(100 days);
+        assertEq(s.matchAvailable(), POOL * 100 days / 365 days);
         vm.prank(alice);
-        t.transfer(dead, 1_000 ether); // someone burns
+        svo.transfer(dead, 1_000 ether);
         assertEq(s.unmatchedBurns(), 1_000 ether);
-        uint256 before = t.balanceOf(dead);
-        uint256 m = s.matchBurn();
-        assertEq(m, 1_000 ether);
-        assertEq(t.balanceOf(dead), before + 1_000 ether);
+        uint256 before = svo.balanceOf(dead);
+        assertEq(s.matchBurn(), 1_000 ether);
+        assertEq(svo.balanceOf(dead), before + 1_000 ether);
         assertEq(s.unmatchedBurns(), 0); // own burn not re-matched
-        assertEq(s.matchUsed(), 1_000 ether);
         vm.expectRevert(SvoStaking.InvalidAmount.selector);
         s.matchBurn();
     }
 
-    function test_matchBurnIsCappedByVestingAndCarriesRemainder() public {
-        _fund();
-        vm.warp(block.timestamp + 1 days);
+    function test_matchBurnCappedByVestingAndCarriesRemainder() public {
+        _fundMatch();
+        skip(1 days);
         uint256 avail = s.matchAvailable();
         vm.prank(alice);
-        t.transfer(dead, avail + 5_000 ether);
-        uint256 m = s.matchBurn();
-        assertEq(m, avail);
-        assertEq(s.unmatchedBurns(), 5_000 ether); // carried
-        vm.warp(block.timestamp + 10 days);
-        m = s.matchBurn();
-        assertEq(m, 5_000 ether);
+        svo.transfer(dead, avail + 5_000 ether);
+        assertEq(s.matchBurn(), avail);
+        assertEq(s.unmatchedBurns(), 5_000 ether);
+        skip(10 days);
+        assertEq(s.matchBurn(), 5_000 ether);
         assertEq(s.unmatchedBurns(), 0);
     }
 
     function test_burnsBeforeFundingAreNotMatched() public {
-        t.transfer(dead, 7 ether);
-        _fund();
-        vm.warp(block.timestamp + 30 days);
+        svo.transfer(dead, 7 ether);
+        _fundMatch();
+        skip(30 days);
         assertEq(s.unmatchedBurns(), 0);
         vm.expectRevert(SvoStaking.InvalidAmount.selector);
         s.matchBurn();
     }
 
     function test_matchPoolNeverExceedsTotal() public {
-        _fund();
-        vm.warp(block.timestamp + 2 * YEAR);
-        t.transfer(dead, 90_000_000 ether);
-        uint256 m = s.matchBurn();
-        assertEq(m, s.matchTotal());
+        _fundMatch();
+        skip(2 * 365 days);
+        svo.transfer(dead, 150_000_000 ether);
+        assertEq(s.matchBurn(), POOL);
         assertEq(s.matchRemaining(), 0);
-        assertEq(s.matchAvailable(), 0);
     }
 
     // ------------------------------------------------------------ conservation
 
-    /// Whatever stakers and burners do, the contract can always cover principal + owed rewards + match pool.
-    function testFuzz_contractStaysSolvent(uint256 aAmt, uint256 bAmt, uint256 dt1, uint256 dt2, uint256 burnAmt) public {
+    function testFuzz_contractStaysSolvent(uint256 aAmt, uint256 bAmt, uint256 over1, uint256 over2, uint256 dt1, uint256 dt2) public {
         aAmt = bound(aAmt, 1 ether, 10_000_000 ether);
         bAmt = bound(bAmt, 1 ether, 10_000_000 ether);
-        dt1 = bound(dt1, 0, 400 days);
-        dt2 = bound(dt2, 0, 400 days);
-        burnAmt = bound(burnAmt, 0, 50_000_000 ether);
-        _fund();
+        over1 = bound(over1, 1 ether, 1_000_000 ether);
+        over2 = bound(over2, 1 ether, 1_000_000 ether);
+        dt1 = bound(dt1, 0, 20 days);
+        dt2 = bound(dt2, 0, 20 days);
         vm.prank(alice);
         s.stake(aAmt);
-        vm.warp(block.timestamp + dt1);
+        _overflow(over1);
+        skip(dt1);
         vm.prank(bob);
         s.stake(bAmt);
-        t.transfer(dead, burnAmt);
-        if (s.unmatchedBurns() > 0 && s.matchAvailable() > 0) s.matchBurn();
-        vm.warp(block.timestamp + dt2);
-        if (s.skipped() > 0 || block.timestamp > s.start()) {
-            try s.burnSkipped() {} catch {}
-        }
+        _overflow(over2);
+        skip(dt2);
         uint256 owed = s.pendingRewards(alice) + s.pendingRewards(bob);
-        uint256 need = s.totalStaked() + owed + (s.matchTotal() - s.matchUsed());
-        assertGe(t.balanceOf(address(s)), need);
+        assertLe(owed, s.rewardsReserved());
+        assertGe(imd.balanceOf(address(s)), s.rewardsReserved());
         vm.prank(alice);
         s.claim();
         vm.prank(bob);
         s.claim();
+        assertGe(imd.balanceOf(address(s)), s.rewardsReserved());
         vm.prank(alice);
         s.unstake(aAmt);
         vm.prank(bob);
         s.unstake(bAmt);
         assertEq(s.totalStaked(), 0);
-        assertGe(t.balanceOf(address(s)), s.matchTotal() - s.matchUsed());
+        assertEq(svo.balanceOf(address(s)), 0);
+        assertEq(s.totalClaimed() + s.rewardsReserved(), over1 + over2);
     }
 }
