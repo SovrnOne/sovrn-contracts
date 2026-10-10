@@ -24,11 +24,15 @@ so a gap is visible to everyone. "Full health" is a number the app publishes (`L
 
 ## Deployment
 Deployed on Robinhood Chain (4663) on 2026-10-10 from commit `8c05b7b`: **`0xe8ebB026Ff49f139aBc50C3Af64bdFebbF28f533`**
-(tx `0xadb4cfaebd461918451c06da61ee719f7d604038eb1e9bb2636e6ad51fd78f47 0x5145e37 0x1`, block ). Constructor: SVO `0x7f7e9b8e9f754c3076e514852552019CB571461b`, reward token IMD
-`0x5F7Bb59365ce557C26dbcAa4EE9d39A4b95B7127`, funder `0x589A639529220f66a2661A41753e3fd432f48DA0` (the founder Safe, 2-of-3).
-The on-chain code equals the local build of that commit: the only differing bytes are the 14 compiler-marked immutable slots,
-which decode to the three addresses above. Not funded yet (`matchStart() == 0`): the Safe still has to run
-`SVO.approve(staking, 1e26)` then `staking.fund(100000000000000000000000000)`. Source is not verified on the explorer yet.
+(tx `0xadb4cfaebd461918451c06da61ee719f7d604038eb1e9bb2636e6ad51fd78f47`, block 85,220,919). Constructor: SVO
+`0x7f7e9b8e9f754c3076e514852552019CB571461b`, reward token IMD `0x5F7Bb59365ce557C26dbcAa4EE9d39A4b95B7127`, funder
+`0x589A639529220f66a2661A41753e3fd432f48DA0` (the Operations Safe, 2-of-3). The on-chain code equals the local build of that commit:
+the only differing bytes are the 14 compiler-marked immutable slots, which decode to the three addresses above.
+
+**Funded** on 2026-10-10 at 19:39:30 UTC with exactly 100,000,000 SVO (`matchTotal() == 1e26`) through one Safe transaction that ran
+`SVO.approve(staking, 1e26)` then `staking.fund(100000000000000000000000000)`: tx
+`0xeea2cb04c1c8dfb8b96922c7d1aa860e2af8db7d030a15db4630cfc5e0434038` (block 85,250,104). The one-time `reclaim()` opens on
+2027-10-10. Nothing was staked at funding time. The source is not yet verified on the explorer.
 
 ## How tokens can leave the contract
 SVO: `unstake` returns a staker's principal; `matchBurn` sends match-pool SVO to DEAD; `reclaim` (below) returns the unmatched
