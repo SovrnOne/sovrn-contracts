@@ -57,8 +57,15 @@ contract DeployStakingTest is Test {
         assertEq(real.funder(), SAFE);
 
         // rehearsal with an EOA funder, to exercise fund(): needs the explicit override
+        // a leftover boolean from an old rehearsal does nothing: the override must name the exact funder
         vm.setEnv("ALLOW_OTHER_FUNDER", "true");
         vm.setEnv("STAKING_FUNDER", vm.toString(DEFAULT_SENDER));
+        vm.expectRevert();
+        script.run();
+        vm.setEnv("ALLOW_OTHER_FUNDER", vm.toString(address(0xBEEF))); // names a different address
+        vm.expectRevert(bytes("funder is not the founder Safe"));
+        script.run();
+        vm.setEnv("ALLOW_OTHER_FUNDER", vm.toString(DEFAULT_SENDER));
         SvoStaking s = script.run();
         assertEq(s.funder(), DEFAULT_SENDER);
         assertEq(s.matchStart(), 0);
@@ -77,6 +84,11 @@ contract DeployStakingTest is Test {
         // an amount that looks like whole tokens typed as wei is refused before anything is signed
         vm.setEnv("FUND_AMOUNT", "100000000");
         vm.expectRevert(bytes("FUND_AMOUNT is below 1,000,000 SVO: is it written in wei?"));
+        script.fund();
+
+        // an in-bounds typo (one zero short of 100,000,000 SVO) is refused unless explicitly overridden
+        vm.setEnv("FUND_AMOUNT", "10000000000000000000000000");
+        vm.expectRevert(bytes("FUND_AMOUNT is not 100,000,000 SVO (ALLOW_OTHER_AMOUNT=true to override)"));
         script.fund();
 
         // a funder that holds too little is refused before anything moves

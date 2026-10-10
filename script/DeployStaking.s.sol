@@ -14,7 +14,9 @@ import {SvoStaking} from "../src/SvoStaking.sol";
 ///       --rpc-url $RPC --private-key $KEY --broadcast
 ///   Step 2, fund. The funder here is a Safe, so do this as a Safe batch, not with this script:
 ///     SVO.approve(staking, amount) then staking.fund(amount), with amount = 100000000000000000000000000
-///     (100,000,000 SVO written in WEI: 1e26. Check matchTotal() afterwards; fund() works only once.)
+///     (100,000,000 SVO written in WEI: 1e26, i.e. fund(100000000000000000000000000). fund() works only once and the
+///     contract accepts any amount from 1,000,000 SVO to a tenth of supply, so simulate the batch first and check that
+///     the amount is exactly 1e26 BEFORE signing; afterwards matchTotal() must read 1e26.)
 ///   fund() below is for an EOA funder only and checks everything it can before sending anything:
 ///     STAKING_CONTRACT=0x... FUND_AMOUNT=100000000000000000000000000 forge script script/DeployStaking.s.sol \
 ///       --sig "fund()" --rpc-url $RPC --private-key $KEY --broadcast
@@ -23,8 +25,8 @@ import {SvoStaking} from "../src/SvoStaking.sol";
 ///   transaction: the script checks the contract's token, reward token and funder, but a contract written to lie about
 ///   them would pass those checks.
 ///
-/// Env: STAKING_FUNDER (run(); must be FOUNDER_SAFE unless ALLOW_OTHER_FUNDER=true, for tests and rehearsals),
-///      STAKING_CONTRACT and FUND_AMOUNT (fund(); amount defaults to 100,000,000 SVO).
+/// Env: STAKING_FUNDER (run(); must be FOUNDER_SAFE unless ALLOW_OTHER_FUNDER is set to that exact address, for
+///      rehearsals), STAKING_CONTRACT and FUND_AMOUNT (fund(); must be 100,000,000 SVO unless ALLOW_OTHER_AMOUNT=true).
 contract DeployStaking is Script {
     uint256 internal constant CHAIN_ID = 4663; // Robinhood Chain
     address internal constant SVO = 0x7f7e9b8e9f754c3076e514852552019CB571461b;
@@ -41,7 +43,11 @@ contract DeployStaking is Script {
 
         address funder = vm.envAddress("STAKING_FUNDER"); // no default: the funder is permanent and holds reclaim()
         require(funder != address(0), "funder is zero");
-        require(funder == FOUNDER_SAFE || vm.envOr("ALLOW_OTHER_FUNDER", false), "funder is not the founder Safe");
+        // The override names the one address it permits, so a leftover value from a rehearsal cannot apply to another funder.
+        if (funder != FOUNDER_SAFE) {
+            require(vm.envOr("ALLOW_OTHER_FUNDER", address(0)) == funder, "funder is not the founder Safe");
+            console2.log("WARNING: funder is NOT the founder Safe (override in use)", funder);
+        }
 
         vm.startBroadcast(); // the broadcaster need not be the funder (it may be a Safe)
         staking = new SvoStaking(SovrnToken(SVO), IMD, funder);
@@ -63,6 +69,8 @@ contract DeployStaking is Script {
         require(address(staking.token()) == SVO, "STAKING_CONTRACT stakes a different token");
         require(staking.rewardToken() == IMD, "STAKING_CONTRACT rewards a different token");
         require(amount >= staking.MIN_FUND(), "FUND_AMOUNT is below 1,000,000 SVO: is it written in wei?");
+        // fund() works once, so a wrong amount inside the contract's bounds is permanent. Pin it like the funder.
+        require(amount == DEFAULT_FUND || vm.envOr("ALLOW_OTHER_AMOUNT", false), "FUND_AMOUNT is not 100,000,000 SVO (ALLOW_OTHER_AMOUNT=true to override)");
         SovrnToken svo = SovrnToken(SVO);
 
         vm.startBroadcast();

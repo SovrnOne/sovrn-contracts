@@ -25,7 +25,8 @@ import {Guard} from "./Interfaces.sol";
 ///      burns have been matched. That is the only way SVO ever leaves the pool other than to DEAD.
 ///
 ///      Access tier. `hasAccess(a)` is true when `a` has at least MIN_STAKE staked and the stake is at least
-///      MIN_STAKE_AGE old. Adding to a stake restarts the age, which stops stake-wait-unstake rental of the tier.
+///      MIN_STAKE_AGE old. Adding to a stake restarts the age, so a pre-staged dust stake cannot be topped up for instant access. It does not stop
+///      renting the tier: any account that keeps MIN_STAKE staked for a day can use it and unstake at once.
 contract SvoStaking is Guard {
     uint256 public constant REWARD_PERIOD = 7 days;
     uint256 public constant MATCH_DURATION = 365 days;
@@ -218,7 +219,7 @@ contract SvoStaking is Guard {
         if (matchStart == 0) return 0;
         uint256 elapsed = block.timestamp - matchStart;
         if (elapsed > MATCH_DURATION) elapsed = MATCH_DURATION;
-        return matchTotal * elapsed / MATCH_DURATION - matchUsed; // matchTotal <= 1e27, elapsed <= 3.2e7: no overflow
+        return matchTotal * elapsed / MATCH_DURATION - matchUsed; // matchTotal <= totalSupply/10 = 1e26, elapsed <= 3.2e7: no overflow
     }
 
     /// @notice SVO burned elsewhere that matchBurn() has not matched yet.

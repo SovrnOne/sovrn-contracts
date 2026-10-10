@@ -438,6 +438,70 @@ contract SvoStakingTest is Test {
         assertLt(rate * WEEK, 700 ether); // the dust is carried, not streamed
         assertEq(s.undistributed(), 700 ether - rate * WEEK);
     }
+
+    // ------------------------------------------------------------ gaps named by the final swarm review
+
+    function test_everyStakerLeavesMidStreamThenSomeoneStakesAgain() public {
+        vm.prank(alice);
+        s.stake(1_000_000 ether);
+        _overflow(700 ether); // 100 IMD per day
+        skip(2 days);
+        vm.prank(alice);
+        s.unstake(1_000_000 ether); // nobody staked from here
+        skip(2 days); // 200 IMD of emission has no staker: it rolls into undistributed
+        vm.prank(bob);
+        s.stake(1_000_000 ether); // someone returns before the stream ends
+        skip(5 days); // past periodFinish
+        s.notify(); // the rolled-over IMD is streamed again (nothing is left running, so no threshold applies)
+        skip(WEEK);
+        vm.prank(alice);
+        uint256 a = s.claim();
+        vm.prank(bob);
+        uint256 b = s.claim();
+        assertApproxEqAbs(a + b, 700 ether, 1e12); // nothing lost, nothing paid twice
+        assertGt(b, 0);
+    }
+
+    function test_reclaimWithNothingLeftStillClosesThePool() public {
+        _fundMatch();
+        skip(365 days);
+        svo.transfer(dead, POOL); // burned elsewhere: the pool matches all of it
+        assertEq(s.reclaim(), 0);
+        assertTrue(s.reclaimed());
+        assertEq(s.matchRemaining(), 0);
+        vm.expectRevert(SvoStaking.AlreadyReclaimed.selector);
+        s.reclaim();
+    }
+
+    function test_partialUnstakeKeepsAccessUntilBelowTheMinimum() public {
+        vm.startPrank(alice);
+        s.stake(2_000_000 ether);
+        skip(1 days);
+        assertTrue(s.hasAccess(alice));
+        s.unstake(1_000_000 ether); // exactly the minimum left: still qualifies, and unstaking does not reset the age
+        assertTrue(s.hasAccess(alice));
+        s.unstake(1); // one wei under
+        assertFalse(s.hasAccess(alice));
+        vm.stopPrank();
+    }
+
+    function testFuzz_burnMatchNeverMatchesMoreThanWasBurnedOrVested(uint256 b1, uint256 b2, uint256 dt1, uint256 dt2) public {
+        b1 = bound(b1, 0, 40_000_000 ether);
+        b2 = bound(b2, 0, 40_000_000 ether);
+        dt1 = bound(dt1, 0, 300 days);
+        dt2 = bound(dt2, 0, 300 days);
+        _fundMatch();
+        svo.transfer(dead, b1);
+        skip(dt1);
+        try s.matchBurn() {} catch {}
+        svo.transfer(dead, b2);
+        skip(dt2);
+        try s.matchBurn() {} catch {}
+        assertLe(s.matchUsed(), b1 + b2);
+        assertLe(s.matchUsed(), s.matchTotal());
+        assertEq(svo.balanceOf(address(s)), s.matchTotal() - s.matchUsed());
+        assertLe(s.matchUsed() + s.unmatchedBurns(), b1 + b2);
+    }
 }
 
 /// Reward token that reports whatever balance it is told to (hostile, compromised or buggy).

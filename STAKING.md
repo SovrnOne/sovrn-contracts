@@ -11,7 +11,7 @@ vault. This contract lets SVO stakers share Solomon's overflow, and holds the fo
 | Reward token | IMD (constructor argument `rewardToken`) |
 | Rewards source | Solomon's overflow: IMD the refuel Safe withdraws from the vault's inference reserve above the "full health" level and sends here |
 | Stream | `notify()` (anyone) streams all IMD not yet accounted over `REWARD_PERIOD` (7 days), pro rata by stake, per second. While a stream is running it only accepts new IMD worth at least a tenth of what is left, so nobody can stretch the payout for free; smaller deposits wait and are streamed once the threshold is met or the stream ends. A restart re-spreads what is left plus the new IMD over a fresh week, so the per-second rate can fall; whoever's IMD is waiting pays the threshold, and anyone may trigger it once it is met. One stream is capped at `MAX_STREAM` (1e40 wei) so a hostile reward token cannot overflow the reward math |
-| Burn-match pool | `fund(amount)`, once, only by the `funder` set at deploy (the founder's SVO; the contract accepts between `MIN_FUND` = 1,000,000 SVO and a tenth of the supply, so a wrong-unit amount cannot use up the one-time deposit); vests linearly over `MATCH_DURATION` (365 days) |
+| Burn-match pool | `fund(amount)`, once (the script pins the amount at 100,000,000 SVO; for a Safe batch simulate it and check `1e26` before signing), only by the `funder` set at deploy (the founder's SVO; the contract accepts between `MIN_FUND` = 1,000,000 SVO and a tenth of the supply, so a wrong-unit amount cannot use up the one-time deposit); vests linearly over `MATCH_DURATION` (365 days) |
 | Access tier | `hasAccess(a)`: at least `MIN_STAKE` (1,000,000 SVO) staked and the stake at least `MIN_STAKE_AGE` (1 day) old |
 | Admin | none: no owner, no pause, no upgrade. The one funder power is `reclaim()` (below) |
 
@@ -43,7 +43,9 @@ reclaimed SVO is ordinary SVO in the funder's wallet; whether it is held, burned
 - **IMD's owner can freeze claims.** IMD is an independent token. Its `owner()` is a single key
   (`0x047F606fD5b2BaA5f5C6c4aB8958E45CB6B054B7`, no code, held by the IMD project's main developer) and IMD has
   `setBlocked(address,bool)`. If that key blocks this contract or a staker, `claim()` reverts for them. Staked SVO is
-  unaffected: `unstake` moves only SVO. The same key could already block the vault or the pool; that predates staking.
+  unaffected: `unstake` moves only SVO. IMD earned by a blocked staker stays in the contract, counted as reserved, until the
+  block is lifted: it is not redistributed and nobody can withdraw it. If the contract itself is blocked, later deposits are
+  frozen too while `notify()` keeps succeeding, so the refuel Safe should check `blocked(staking)` before sending surplus. The same key could already block the vault or the pool; that predates staking.
 - **The refuel Safe decides when the surplus is sent.** The vault is immutable and only the Safe can withdraw, so the
   contract cannot pull Solomon's overflow. `/tokenomics` shows the surplus still waiting in the vault.
 - **The funder (a Safe) holds `reclaim()`** and the founder allocation until it is funded.
@@ -76,14 +78,24 @@ Reviews so far, all single-reviewer AI reviews, none a substitute for an indepen
   unreachable with the real IMD); `fund()` now accepts only `MIN_FUND` to a tenth of the supply; `DeployStaking` pins the
   chain, the SVO and IMD addresses and the founder Safe (override only with `ALLOW_OTHER_FUNDER=true`) and refuses a
   `FUND_AMOUNT` below `MIN_FUND`; NatSpec now says `reclaim()` withdraws and that `notify()` restarts; `RewardAdded.streamed`
-  now reports what is actually streamed; `Staked`/`Unstaked` use `accountTotal`. **These last fixes were tested (222 tests,
-  plus a dry run against the live chain) but not re-audited.**
+  now reports what is actually streamed; `Staked`/`Unstaked` use `accountTotal`. **These fixes were then checked by the final swarm round below.**
+
+- 2026-10-10, final IMD swarm audit of `cfd73ae` (job `36b2abd5-7aa4-4924-9236-59ea60642f13`): no critical, high or medium
+  findings; 1 low and 7 info, all reproduced. Acted on: `DeployStaking.fund()` now pins the amount at 100,000,000 SVO unless
+  `ALLOW_OTHER_AMOUNT=true` (an in-bounds typo would fix the pool at the wrong size, permanently); the funder override is now
+  `ALLOW_OTHER_FUNDER=<that exact address>`, so a leftover value cannot apply to another funder; the access-tier wording above
+  now says what the age reset does and does not stop; the blocked-staker note above; test gaps filled (all stakers leaving
+  mid-stream, reclaim with nothing left, partial unstake, burn-match fuzz). Not changed: the error names
+  (`TransferFailed` for a failed `balanceOf`, `Unauthorized` for bad constructor arguments) are misleading but harmless; the
+  launch README is hashed by the attestation and keeps its unqualified "no payouts" sentence, with the staking disclosure in
+  this file and on the app's stake page. This file's wording and the script were fixed after the review; the contract's
+  logic was not changed.
 
 ## Known properties
 - Rewards depend on how much surplus exists. They can be zero, and the share per staked SVO falls as more is staked.
 - If nothing is staked while a stream runs, that emission rolls into the next `notify()` instead of being lost.
-- Adding to a stake restarts its age (stops stake-wait-unstake rental of the tier). Unstaking is instant.
+- Adding to a stake restarts its age, so a pre-staged dust stake cannot be topped up for instant access. This does not stop renting the tier: any account that keeps `MIN_STAKE` staked for a day can use it and unstake at once. Unstaking is instant.
 - Rounding dust (below a millionth of a token per update; it accumulates across updates and stays in the contract).
 - Tokens sent by plain transfer other than IMD for `notify()`, or SVO other than via `fund`/`stake`, are stranded.
 - The tier is read by the app from `hasAccess`; the 30-minute cap itself is enforced in the visitor's browser, like the 10-minute one.
-- Tests: `test/SvoStaking.t.sol` (unit, a misbehaving-IMD case, fuzz solvency).
+- Tests: `test/SvoStaking.t.sol` (unit, misbehaving-IMD, burn-match and fuzz tests), `test/DeployStaking.t.sol` (the deploy and fund script, and a fork test against the real IMD: `FORK_4663_RPC=... forge test --match-contract StakingForkTest`). Run `forge test` for the current count.
