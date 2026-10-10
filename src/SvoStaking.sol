@@ -19,7 +19,9 @@ import {Guard} from "./Interfaces.sol";
 ///      Burn-match (SVO). `fund()` deposits the founder allocation once. `matchBurn()` is permissionless: it
 ///      reads how much SVO has been sent to DEAD since the last call (the token's own `totalBurned`, excluding
 ///      this contract's own burns) and burns the same amount again from the pool, limited to what has vested
-///      (linear over MATCH_DURATION). Burns it could not match yet carry forward.
+///      (linear over MATCH_DURATION). Burns it could not match yet carry forward. Once the pool has fully vested
+///      (MATCH_DURATION after `fund()`), the funder may `reclaim()` whatever is left, one time, after any waiting
+///      burns have been matched. That is the only way SVO ever leaves the pool other than to DEAD.
 ///
 ///      Access tier. `hasAccess(a)` is true when `a` has at least MIN_STAKE staked and the stake is at least
 ///      MIN_STAKE_AGE old. Adding to a stake restarts the age, which stops stake-wait-unstake rental of the tier.
@@ -55,6 +57,7 @@ contract SvoStaking is Guard {
     uint256 public matchStart;
     uint256 public matchTotal;
     uint256 public matchUsed;
+    bool public reclaimed;
     uint256 private burnSnapshot; // token.totalBurned() less burns already matched or made by this contract
 
     event Staked(address indexed account, uint256 amount, uint256 total);
@@ -62,10 +65,12 @@ contract SvoStaking is Guard {
     event Claimed(address indexed account, uint256 amount);
     event RewardAdded(uint256 added, uint256 streamed, uint256 rate, uint256 periodFinish);
     event Funded(uint256 amount, uint256 start);
+    event Reclaimed(address indexed funder, uint256 amount);
     event MatchBurned(address indexed caller, uint256 observed, uint256 matched, uint256 matchRemaining);
     error Unauthorized();
     error AlreadyFunded();
     error NotFunded();
+    error TooEarly();
     error InvalidAmount();
     error TransferFailed();
 
@@ -149,11 +154,33 @@ contract SvoStaking is Guard {
     /// @notice Burn from the pool the same amount of SVO that was burned elsewhere since the last call.
     function matchBurn() external nonReentrant returns (uint256 matched) {
         if (matchStart == 0) revert NotFunded();
+        matched = _match();
+        if (matched == 0) revert InvalidAmount();
+    }
+
+    /// @notice After MATCH_DURATION the funder may take back whatever the pool has not matched. Burns that
+    ///         are still waiting to be matched are matched first, so this can never cut one off. One time;
+    ///         it closes the pool for good.
+    function reclaim() external nonReentrant returns (uint256 returned) {
+        if (msg.sender != funder) revert Unauthorized();
+        if (matchStart == 0) revert NotFunded();
+        if (reclaimed) revert AlreadyFunded();
+        if (block.timestamp < matchStart + MATCH_DURATION) revert TooEarly();
+        _match();
+        reclaimed = true;
+        returned = matchTotal - matchUsed;
+        matchTotal = matchUsed; // nothing left to vest or match
+        if (returned != 0 && !token.transfer(funder, returned)) revert TransferFailed();
+        emit Reclaimed(funder, returned);
+    }
+
+    /// @dev Matches what has been burned elsewhere, within the vested amount. Returns 0 when there is nothing to do.
+    function _match() private returns (uint256 matched) {
         uint256 observed = token.totalBurned() - burnSnapshot;
         matched = observed;
         uint256 available = matchAvailable();
         if (matched > available) matched = available;
-        if (matched == 0) revert InvalidAmount();
+        if (matched == 0) return 0;
         matchUsed += matched;
         // Consume `matched` of the observed burns and skip over this contract's own burn of the same size.
         burnSnapshot += 2 * matched;

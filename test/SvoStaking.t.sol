@@ -271,4 +271,44 @@ contract SvoStakingTest is Test {
         assertEq(svo.balanceOf(address(s)), 0);
         assertEq(s.totalClaimed() + s.rewardsReserved(), over1 + over2);
     }
+
+    // ------------------------------------------------------------ reclaim
+
+    function test_reclaimOnlyFunderOnlyAfterAYearOnlyOnce() public {
+        _fundMatch();
+        vm.prank(alice);
+        vm.expectRevert(SvoStaking.Unauthorized.selector);
+        s.reclaim();
+        skip(365 days - 1);
+        vm.expectRevert(SvoStaking.TooEarly.selector);
+        s.reclaim();
+        skip(1);
+        uint256 before = svo.balanceOf(address(this));
+        assertEq(s.reclaim(), POOL);
+        assertEq(svo.balanceOf(address(this)), before + POOL);
+        assertEq(svo.balanceOf(address(s)), 0);
+        assertEq(s.matchRemaining(), 0);
+        vm.expectRevert(SvoStaking.AlreadyFunded.selector);
+        s.reclaim();
+        // the pool is closed: later burns are not matched
+        svo.transfer(dead, 5 ether);
+        vm.expectRevert(SvoStaking.InvalidAmount.selector);
+        s.matchBurn();
+    }
+
+    function test_reclaimMatchesWaitingBurnsFirst() public {
+        _fundMatch();
+        skip(365 days);
+        svo.transfer(dead, 30_000_000 ether); // burned, not yet matched
+        uint256 before = svo.balanceOf(address(this));
+        uint256 returned = s.reclaim();
+        assertEq(returned, POOL - 30_000_000 ether);
+        assertEq(s.matchUsed(), 30_000_000 ether);
+        assertEq(svo.balanceOf(address(this)), before + returned);
+    }
+
+    function test_reclaimNeedsFunding() public {
+        vm.expectRevert(SvoStaking.NotFunded.selector);
+        s.reclaim();
+    }
 }

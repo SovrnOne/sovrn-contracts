@@ -13,7 +13,7 @@ vault. This contract lets SVO stakers share Solomon's overflow, and holds the fo
 | Stream | `notify()` (anyone) streams all IMD not yet accounted over `REWARD_PERIOD` (7 days), pro rata by stake, per second |
 | Burn-match pool | `fund(amount)`, once, only by the `funder` set at deploy (the founder's SVO, up to 10% of supply); vests linearly over `MATCH_DURATION` (365 days) |
 | Access tier | `hasAccess(a)`: at least `MIN_STAKE` (1,000,000 SVO) staked and the stake at least `MIN_STAKE_AGE` (1 day) old |
-| Admin | none: no owner, no pause, no upgrade, no withdraw of either pool |
+| Admin | none: no owner, no pause, no upgrade. The one funder power is `reclaim()` (below) |
 
 ## Overflow: what is and is not enforced on chain
 The `LifeForceVault` is immutable and only `REFUEL_SAFE` can withdraw from it, so **the contract cannot pull the surplus**.
@@ -23,8 +23,8 @@ the surplus. The app's `/tokenomics` shows the surplus still waiting in the vaul
 so a gap is visible to everyone. "Full health" is a number the app publishes (`LIFE_FORCE_FULL_WEI`); it is not in any contract.
 
 ## How tokens can leave the contract
-SVO: `unstake` returns a staker's principal; `matchBurn` sends match-pool SVO to DEAD. Nothing else, including for the funder
-after `fund()`.
+SVO: `unstake` returns a staker's principal; `matchBurn` sends match-pool SVO to DEAD; `reclaim` (below) returns the unmatched
+remainder of the pool to the funder, once, a year after `fund()`. Nothing else.
 IMD: `claim` pays a staker's earned rewards. Nothing else.
 `unstake` moves only SVO, so a misbehaving IMD (blocklist, pause) can block `claim` but never a staker's principal.
 
@@ -32,6 +32,12 @@ IMD: `claim` pays a staker's earned rewards. Nothing else.
 `matchBurn()` is permissionless. It reads `token.totalBurned()` and matches the increase since the last call (burns before
 funding are ignored; this contract's own burns are never matched), capped by the part of the pool that has vested. An
 unmatched remainder carries forward. After `MATCH_DURATION` the whole pool is available.
+
+## Reclaim
+`reclaim()` is callable only by the funder, only once, and only when `MATCH_DURATION` (365 days) has passed since `fund()`. It first
+matches any burns still waiting (so it can never cut one off), then sends the unmatched remainder of the pool to the funder and
+closes the pool (`matchTotal` becomes `matchUsed`; later burns are not matched). It cannot touch staked SVO or IMD rewards. The
+reclaimed SVO is ordinary SVO in the funder's wallet; whether it is held, burned or sold is up to the funder.
 
 ## Known properties
 - Rewards depend on how much surplus exists. They can be zero, and the share per staked SVO falls as more is staked.
