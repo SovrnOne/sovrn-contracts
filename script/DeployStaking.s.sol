@@ -17,8 +17,10 @@ import {SvoStaking} from "../src/SvoStaking.sol";
 ///   Omit --broadcast for a dry run. If the funder is a Safe, do step 2 as a Safe batch instead:
 ///   SVO.approve(staking, amount) then staking.fund(amount).
 ///
-/// Env: SVO_TOKEN (required), STAKING_FUNDER (default: the broadcaster; permanent, choose carefully),
+/// Env: SVO_TOKEN (required, both steps), STAKING_FUNDER (required for run(); permanent, choose carefully),
 ///      EXPECT_CHAIN_ID (default 4663), FUND_AMOUNT (default 100,000,000 SVO), STAKING_CONTRACT (for fund()).
+/// Before fund(), compare STAKING_CONTRACT with the address in your own deploy transaction: the script checks the
+/// contract's token, reward token and funder, but a contract written to lie about them would pass those checks.
 /// IMD is the pool's paired token on chain 4663; it is the reward token.
 contract DeployStaking is Script {
     address internal constant IMD = 0x5F7Bb59365ce557C26dbcAa4EE9d39A4b95B7127;
@@ -32,10 +34,10 @@ contract DeployStaking is Script {
         require(SovrnToken(svo).totalSupply() == 1_000_000_000 ether, "SVO_TOKEN is not SVO");
         require(keccak256(bytes(SovrnToken(svo).symbol())) == keccak256("SVO"), "SVO_TOKEN symbol");
 
-        vm.startBroadcast();
-        (, address caller,) = vm.readCallers();
-        address funder = vm.envOr("STAKING_FUNDER", caller);
+        address funder = vm.envAddress("STAKING_FUNDER"); // no default: the funder is permanent and holds reclaim()
         require(funder != address(0), "funder is zero");
+
+        vm.startBroadcast(); // the broadcaster need not be the funder (it may be a Safe)
         staking = new SvoStaking(SovrnToken(svo), IMD, funder);
         vm.stopBroadcast();
 
@@ -47,11 +49,14 @@ contract DeployStaking is Script {
     }
 
     function fund() external {
+        require(block.chainid == vm.envOr("EXPECT_CHAIN_ID", uint256(4663)), "wrong chain");
         SvoStaking staking = SvoStaking(vm.envAddress("STAKING_CONTRACT"));
         uint256 amount = vm.envOr("FUND_AMOUNT", DEFAULT_FUND);
         require(address(staking).code.length != 0, "STAKING_CONTRACT has no code");
         require(staking.matchStart() == 0, "already funded");
         SovrnToken svo = staking.token();
+        require(address(svo) == vm.envAddress("SVO_TOKEN"), "STAKING_CONTRACT stakes a different token");
+        require(staking.rewardToken() == IMD, "STAKING_CONTRACT rewards a different token");
 
         vm.startBroadcast();
         (, address caller,) = vm.readCallers();

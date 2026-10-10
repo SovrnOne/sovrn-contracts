@@ -25,17 +25,36 @@ contract DeployStakingTest is Test {
 
     /// One test on purpose: the script reads process env vars, which parallel tests would overwrite.
     function test_deployFundAndGuards() public {
-        // wrong chain is refused
+        // wrong chain is refused by both steps
         vm.chainId(1);
         vm.expectRevert(bytes("wrong chain"));
         script.run();
+        vm.expectRevert(bytes("wrong chain"));
+        script.fund();
         vm.chainId(4663);
+
+        // the funder has no default
+        vm.setEnv("STAKING_FUNDER", "");
+        vm.expectRevert();
+        script.run();
+        vm.setEnv("STAKING_FUNDER", vm.toString(DEFAULT_SENDER));
 
         SvoStaking s = script.run();
         assertEq(address(s.token()), address(svo));
         assertEq(s.rewardToken(), IMD);
         assertEq(s.funder(), DEFAULT_SENDER);
         assertEq(s.matchStart(), 0);
+
+        // a staking contract for a different token or reward token is refused before anything moves
+        SvoStaking wrongToken = new SvoStaking(new SovrnToken(), IMD, DEFAULT_SENDER);
+        vm.setEnv("STAKING_CONTRACT", vm.toString(address(wrongToken)));
+        vm.expectRevert(bytes("STAKING_CONTRACT stakes a different token"));
+        script.fund();
+        SvoStaking wrongReward = new SvoStaking(svo, address(new SovrnToken()), DEFAULT_SENDER);
+        vm.setEnv("STAKING_CONTRACT", vm.toString(address(wrongReward)));
+        vm.expectRevert(bytes("STAKING_CONTRACT rewards a different token"));
+        script.fund();
+        vm.setEnv("STAKING_CONTRACT", vm.toString(address(s)));
 
         // a funder that holds too little is refused before anything moves
         vm.setEnv("STAKING_CONTRACT", vm.toString(address(s)));

@@ -374,4 +374,9 @@ contract SvoStakingTest is Test {
         vm.expectRevert(SvoStaking.TransferFailed.selector);
         s2.claim();
     }
+
+    function test_constructorRejectsRewardTokenEqualToStakedToken() public {
+        vm.expectRevert(SvoStaking.Unauthorized.selector);
+        new SvoStaking(svo, address(svo), address(this));
+    }
 }

@@ -39,18 +39,42 @@ matches any burns still waiting (so it can never cut one off), then sends the un
 closes the pool (`matchTotal` becomes `matchUsed`; later burns are not matched). It cannot touch staked SVO or IMD rewards. The
 reclaimed SVO is ordinary SVO in the funder's wallet; whether it is held, burned or sold is up to the funder.
 
-## Audit notes (2026-10-10, independent review plus own pass)
-No critical or high findings; staked SVO cannot be taken or locked. Fixed: free `notify()` could stretch the stream (now needs real new IMD of at least a tenth of the remainder); `claim` now reverts if the reward token has no code; `reclaim` has its own `AlreadyReclaimed` error; `unmatchedBurns()` is 0 after reclaim. Accepted and documented:
-- A burn made just before `reclaim()` is matched first, so anyone can make the pool burn up to the whole remainder at a cost to them equal to the amount burned (it is destroyed together with the pool's equal burn).
-- While nothing else is staked, a staker of any size, even 1 wei, earns the whole stream; later stakers share it pro rata from when they join.
-- Reward accounting assumes an 18-decimal reward token (per-update rounding is at most `totalStaked / 1e18` wei).
-- Tier rental is limited, not removed: the same SVO can rotate across accounts at about one new account per day.
+## Trust assumptions you should know about
+- **IMD's owner can freeze claims.** IMD is an independent token. Its `owner()` is a single key
+  (`0x047F606fD5b2BaA5f5C6c4aB8958E45CB6B054B7`, no code, held by the IMD project's main developer) and IMD has
+  `setBlocked(address,bool)`. If that key blocks this contract or a staker, `claim()` reverts for them. Staked SVO is
+  unaffected: `unstake` moves only SVO. The same key could already block the vault or the pool; that predates staking.
+- **The refuel Safe decides when the surplus is sent.** The vault is immutable and only the Safe can withdraw, so the
+  contract cannot pull Solomon's overflow. `/tokenomics` shows the surplus still waiting in the vault.
+- **The funder (a Safe) holds `reclaim()`** and the founder allocation until it is funded.
+- **Fund one matcher only.** The burn-match reads `token.totalBurned()`, which counts every transfer to DEAD, including
+  another matcher's. Two funded `SvoStaking` contracts on the same SVO would match each other's burns and drain both
+  pools for gas only. Never fund a second one while another holds SVO; reclaim or exhaust the first.
+- **Vault burns are matched.** `LifeForceVault.burn()` sends SVO to DEAD, so those burns count toward the match. This is
+  intended.
+- **Pin the address between deploy and fund.** `script/DeployStaking.s.sol fund()` checks that `STAKING_CONTRACT` stakes
+  the expected SVO and rewards IMD, but a contract written to lie about that would pass. Compare the address with your own
+  deploy transaction before the Safe batch.
+
+## Audit notes
+Reviews so far, all single-reviewer AI reviews, none a substitute for an independent human audit:
+- 2026-10-10, two internal reviews. Fixed: free `notify()` could stretch a running stream (now needs new IMD of at least a
+  tenth of the remainder); `claim` reverts if the reward token has no code; `AlreadyReclaimed` error; `unmatchedBurns()`
+  is 0 after reclaim.
+- 2026-10-10, external review of `8a3222d` (IMD job `6d08c511-9192-424f-95b3-c301eb934d36`): no critical or high
+  findings. Acted on: the constructor now rejects `rewardToken == token`; the deploy script has no default funder, `fund()`
+  checks the chain, the staked token and the reward token. Accepted: restarting a running stream costs a donor a tenth of
+  the remainder in real IMD and only delays rewards (nothing is lost); truncation dust accumulates across updates (below a
+  millionth of a token per update, negligible at 18 decimals).
+- Accepted: a burn just before `reclaim()` makes the pool burn that much first, at an equal cost to the burner; with nothing
+  else staked a staker of any size earns the whole stream; the same SVO can rotate across accounts to rent the access tier
+  at about one new account per day; reward accounting assumes an 18-decimal IMD.
 
 ## Known properties
 - Rewards depend on how much surplus exists. They can be zero, and the share per staked SVO falls as more is staked.
 - If nothing is staked while a stream runs, that emission rolls into the next `notify()` instead of being lost.
 - Adding to a stake restarts its age (stops stake-wait-unstake rental of the tier). Unstaking is instant.
-- Rounding dust (below a millionth of a token) stays in the contract.
+- Rounding dust (below a millionth of a token per update; it accumulates across updates and stays in the contract).
 - Tokens sent by plain transfer other than IMD for `notify()`, or SVO other than via `fund`/`stake`, are stranded.
 - The tier is read by the app from `hasAccess`; the 30-minute cap itself is enforced in the visitor's browser, like the 10-minute one.
 - Tests: `test/SvoStaking.t.sol` (unit, a misbehaving-IMD case, fuzz solvency).

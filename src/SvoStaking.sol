@@ -77,6 +77,9 @@ contract SvoStaking is Guard {
 
     constructor(SovrnToken token_, address rewardToken_, address funder_) {
         if (address(token_).code.length == 0 || rewardToken_.code.length == 0 || funder_ == address(0)) revert Unauthorized();
+        // Rewards are measured as the reward token's balance above what is reserved. If it were the staked token,
+        // staked principal and the burn-match pool would be streamed out as rewards.
+        if (rewardToken_ == address(token_)) revert Unauthorized();
         token = token_;
         rewardToken = rewardToken_;
         funder = funder_;
