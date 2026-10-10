@@ -71,6 +71,7 @@ contract SvoStaking is Guard {
     error AlreadyFunded();
     error NotFunded();
     error TooEarly();
+    error AlreadyReclaimed();
     error InvalidAmount();
     error TransferFailed();
 
@@ -110,6 +111,7 @@ contract SvoStaking is Guard {
         earned[msg.sender] = 0;
         rewardsReserved -= reward;
         totalClaimed += reward;
+        if (rewardToken.code.length == 0) revert TransferFailed(); // a call to an address with no code would look like success
         (bool ok, bytes memory data) = rewardToken.call(abi.encodeWithSignature("transfer(address,uint256)", msg.sender, reward));
         if (!ok || (data.length != 0 && !abi.decode(data, (bool)))) revert TransferFailed();
         emit Claimed(msg.sender, reward);
@@ -118,7 +120,9 @@ contract SvoStaking is Guard {
     // ---------------------------------------------------------------- rewards
 
     /// @notice Start (or extend) the stream with IMD that has arrived since the last call. Anyone may call.
-    ///         Also restarts emission that rolled over while nothing was staked.
+    ///         While a stream is running, only when the new IMD is at least a tenth of what is left to stream;
+    ///         smaller amounts wait (nothing is lost) until that is met or the stream ends. Also restarts
+    ///         emission that rolled over while nothing was staked.
     function notify() external nonReentrant returns (uint256 added) {
         _updateGlobal();
         uint256 balance = _rewardBalance();
@@ -128,6 +132,9 @@ contract SvoStaking is Guard {
             totalNotified += added;
         }
         uint256 leftover = block.timestamp < periodFinish ? (periodFinish - block.timestamp) * rewardRate : 0;
+        // While a stream is running it may only be extended by real new IMD worth at least a tenth of what is left.
+        // Otherwise anyone could call notify() for free and keep pushing the remaining payout further out.
+        if (leftover != 0 && (added == 0 || added < leftover / 10)) revert InvalidAmount();
         uint256 total = added + leftover + undistributed;
         if (total < REWARD_PERIOD) revert InvalidAmount(); // would stream at less than 1 wei per second
         rewardRate = total / REWARD_PERIOD;
@@ -164,7 +171,7 @@ contract SvoStaking is Guard {
     function reclaim() external nonReentrant returns (uint256 returned) {
         if (msg.sender != funder) revert Unauthorized();
         if (matchStart == 0) revert NotFunded();
-        if (reclaimed) revert AlreadyFunded();
+        if (reclaimed) revert AlreadyReclaimed();
         if (block.timestamp < matchStart + MATCH_DURATION) revert TooEarly();
         _match();
         reclaimed = true;
@@ -204,7 +211,7 @@ contract SvoStaking is Guard {
 
     /// @notice SVO burned elsewhere that matchBurn() has not matched yet.
     function unmatchedBurns() external view returns (uint256) {
-        if (matchStart == 0) return 0;
+        if (matchStart == 0 || reclaimed) return 0;
         return token.totalBurned() - burnSnapshot;
     }
 

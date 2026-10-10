@@ -10,7 +10,7 @@ vault. This contract lets SVO stakers share Solomon's overflow, and holds the fo
 | Staked and matched token | SVO (`SovrnToken`), immutable constructor argument |
 | Reward token | IMD (constructor argument `rewardToken`) |
 | Rewards source | Solomon's overflow: IMD the refuel Safe withdraws from the vault's inference reserve above the "full health" level and sends here |
-| Stream | `notify()` (anyone) streams all IMD not yet accounted over `REWARD_PERIOD` (7 days), pro rata by stake, per second |
+| Stream | `notify()` (anyone) streams all IMD not yet accounted over `REWARD_PERIOD` (7 days), pro rata by stake, per second. While a stream is running it only accepts new IMD worth at least a tenth of what is left, so nobody can stretch the payout for free; smaller deposits wait and are streamed once the threshold is met or the stream ends |
 | Burn-match pool | `fund(amount)`, once, only by the `funder` set at deploy (the founder's SVO, up to 10% of supply); vests linearly over `MATCH_DURATION` (365 days) |
 | Access tier | `hasAccess(a)`: at least `MIN_STAKE` (1,000,000 SVO) staked and the stake at least `MIN_STAKE_AGE` (1 day) old |
 | Admin | none: no owner, no pause, no upgrade. The one funder power is `reclaim()` (below) |
@@ -38,6 +38,13 @@ unmatched remainder carries forward. After `MATCH_DURATION` the whole pool is av
 matches any burns still waiting (so it can never cut one off), then sends the unmatched remainder of the pool to the funder and
 closes the pool (`matchTotal` becomes `matchUsed`; later burns are not matched). It cannot touch staked SVO or IMD rewards. The
 reclaimed SVO is ordinary SVO in the funder's wallet; whether it is held, burned or sold is up to the funder.
+
+## Audit notes (2026-10-10, independent review plus own pass)
+No critical or high findings; staked SVO cannot be taken or locked. Fixed: free `notify()` could stretch the stream (now needs real new IMD of at least a tenth of the remainder); `claim` now reverts if the reward token has no code; `reclaim` has its own `AlreadyReclaimed` error; `unmatchedBurns()` is 0 after reclaim. Accepted and documented:
+- A burn made just before `reclaim()` is matched first, so anyone can make the pool burn up to the whole remainder at a cost to them equal to the amount burned (it is destroyed together with the pool's equal burn).
+- While nothing else is staked, a staker of any size, even 1 wei, earns the whole stream; later stakers share it pro rata from when they join.
+- Reward accounting assumes an 18-decimal reward token (per-update rounding is at most `totalStaked / 1e18` wei).
+- Tier rental is limited, not removed: the same SVO can rotate across accounts at about one new account per day.
 
 ## Known properties
 - Rewards depend on how much surplus exists. They can be zero, and the share per staked SVO falls as more is staked.

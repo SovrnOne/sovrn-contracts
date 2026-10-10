@@ -253,7 +253,8 @@ contract SvoStakingTest is Test {
         skip(dt1);
         vm.prank(bob);
         s.stake(bAmt);
-        _overflow(over2);
+        imd.transfer(address(s), over2);
+        try s.notify() {} catch {} // may wait: under a tenth of what is left to stream
         skip(dt2);
         uint256 owed = s.pendingRewards(alice) + s.pendingRewards(bob);
         assertLe(owed, s.rewardsReserved());
@@ -269,7 +270,7 @@ contract SvoStakingTest is Test {
         s.unstake(bAmt);
         assertEq(s.totalStaked(), 0);
         assertEq(svo.balanceOf(address(s)), 0);
-        assertEq(s.totalClaimed() + s.rewardsReserved(), over1 + over2);
+        assertEq(s.totalClaimed() + s.rewardsReserved() + s.unnotified(), over1 + over2);
     }
 
     // ------------------------------------------------------------ reclaim
@@ -288,8 +289,9 @@ contract SvoStakingTest is Test {
         assertEq(svo.balanceOf(address(this)), before + POOL);
         assertEq(svo.balanceOf(address(s)), 0);
         assertEq(s.matchRemaining(), 0);
-        vm.expectRevert(SvoStaking.AlreadyFunded.selector);
+        vm.expectRevert(SvoStaking.AlreadyReclaimed.selector);
         s.reclaim();
+        assertEq(s.unmatchedBurns(), 0);
         // the pool is closed: later burns are not matched
         svo.transfer(dead, 5 ether);
         vm.expectRevert(SvoStaking.InvalidAmount.selector);
@@ -310,5 +312,66 @@ contract SvoStakingTest is Test {
     function test_reclaimNeedsFunding() public {
         vm.expectRevert(SvoStaking.NotFunded.selector);
         s.reclaim();
+    }
+
+    // ------------------------------------------------------------ audit fixes
+
+    function test_freeNotifyCannotStretchTheStream() public {
+        vm.prank(alice);
+        s.stake(1_000_000 ether);
+        _overflow(7000 ether);
+        skip(6 days);
+        vm.expectRevert(SvoStaking.InvalidAmount.selector);
+        s.notify(); // nothing new: must not push the last day's payout out to a fresh week
+        imd.transfer(address(s), 1 wei);
+        vm.expectRevert(SvoStaking.InvalidAmount.selector);
+        s.notify(); // dust does not count either
+        assertEq(s.unnotified(), 1 wei);
+        skip(1 days);
+        vm.prank(alice);
+        assertApproxEqAbs(s.claim(), 7000 ether, 1e12); // paid on the original schedule
+    }
+
+    function test_smallDepositWaitsThenStreamsOnceTheStreamEnds() public {
+        vm.prank(alice);
+        s.stake(1_000_000 ether);
+        _overflow(700 ether);
+        skip(1 days);
+        imd.transfer(address(s), 10 ether); // far under a tenth of the ~600 left
+        vm.expectRevert(SvoStaking.InvalidAmount.selector);
+        s.notify();
+        skip(WEEK);
+        s.notify(); // stream over: now it starts, nothing was lost
+        skip(WEEK);
+        vm.prank(alice);
+        assertApproxEqAbs(s.claim(), 710 ether, 1e12);
+    }
+
+    function test_deposit_ofATenthOrMoreExtendsTheStream() public {
+        vm.prank(alice);
+        s.stake(1_000_000 ether);
+        _overflow(700 ether);
+        skip(1 days);
+        _overflow(60 ether); // exactly a tenth of the 600 left
+        skip(WEEK);
+        vm.prank(alice);
+        assertApproxEqAbs(s.claim(), 760 ether, 1e12);
+    }
+
+    function test_claimRevertsIfRewardTokenHasNoCode() public {
+        // an address that had code at deploy and lost it cannot make claim() look successful
+        BrokenIMD bad = new BrokenIMD();
+        SvoStaking s2 = new SvoStaking(svo, address(bad), address(this));
+        vm.prank(alice);
+        svo.approve(address(s2), type(uint256).max);
+        vm.prank(alice);
+        s2.stake(1_000_000 ether);
+        bad.transfer(address(s2), 100 ether);
+        s2.notify();
+        skip(WEEK);
+        vm.etch(address(bad), "");
+        vm.prank(alice);
+        vm.expectRevert(SvoStaking.TransferFailed.selector);
+        s2.claim();
     }
 }
