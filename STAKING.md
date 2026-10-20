@@ -3,7 +3,9 @@
 `src/SvoStaking.sol` is a post-launch contract. It is not part of the launch build in `launch-attestation.json` and is not
 covered by `README.md`, whose statement that the *launch contracts* pay SVO holders nothing stays true of the token, hook and
 vault. This contract lets SVO stakers share Solomon's overflow, and holds the founder allocation as a burn-match pool.
-**No audit is claimed.**
+**No audit is claimed.** `README.md` line 109 ("no setters or setup transactions exist") describes the launch contracts only;
+this post-launch contract and the `OverflowKeeper` Safe module (`KEEPER.md`) have the setters and the one setup transaction
+(`enableModule`) described there.
 
 | Item | Value |
 | --- | --- |
@@ -16,11 +18,21 @@ vault. This contract lets SVO stakers share Solomon's overflow, and holds the fo
 | Admin | none: no owner, no pause, no upgrade. The one funder power is `reclaim()` (below) |
 
 ## Overflow: what is and is not enforced on chain
-The `LifeForceVault` is immutable and only `REFUEL_SAFE` can withdraw from it, so **the contract cannot pull the surplus**.
-The Safe sends it (an IMD transfer to this contract), then anyone calls `notify()`. What is enforced: once IMD is here it can only
-go to stakers (via `claim`); there is no other exit. What is a Safe commitment, not a contract guarantee: that the Safe sends
-the surplus. The app's `/tokenomics` shows the surplus still waiting in the vault (`inferenceReserve() - LIFE_FORCE_FULL_WEI`)
-so a gap is visible to everyone. "Full health" is a number the app publishes (`LIFE_FORCE_FULL_WEI`); it is not in any contract.
+The `LifeForceVault` is immutable and only `REFUEL_SAFE` can withdraw from it, so **this contract cannot pull the surplus**.
+Two ways exist for it to arrive:
+- **By hand**: the Safe withdraws and sends it (an IMD transfer to this contract), then anyone calls `notify()`. This was the
+  only way until 2026-10-20 and stays the fallback.
+- **Through the `OverflowKeeper` Safe module** (`src/OverflowKeeper.sol`, `KEEPER.md`): once the refuel Safe has enabled it,
+  anyone may call `sweep()`, which makes the Safe withdraw the inference reserve above `full` (25 IMD, a value only the Safe
+  can change with `setFull`), pay the caller 0.5% and send the rest here, then call `notify()` when the stream will accept it
+  (otherwise the IMD waits here and the next big enough sweep streams it). The keeper can make the Safe do nothing else, can
+  never take the reserve below `full`, and reverts if the Safe would end a sweep with less IMD than it started with.
+
+What is enforced: once IMD is here it can only go to stakers (via `claim`); there is no other exit. What remains a Safe
+commitment, not a contract guarantee: keeping the module enabled (`disableModule` is one 2-of-3 transaction) and the value of
+`full`. The app's `/on-chain` shows the surplus still waiting in the vault and whether the module is enabled, so a gap is
+visible to everyone. With the keeper on, the stream is in effect perpetual with a lag of up to seven days: each sweep that
+meets the one-tenth rule re-spreads what is left plus the new IMD over a fresh week (the rate can fall; nothing is lost).
 
 ## Deployment
 Deployed on Robinhood Chain (4663) on 2026-10-10 from commit `8c05b7b`: **`0xe8ebB026Ff49f139aBc50C3Af64bdFebbF28f533`**
@@ -57,9 +69,13 @@ reclaimed SVO is ordinary SVO in the funder's wallet; whether it is held, burned
   `setBlocked(address,bool)`. If that key blocks this contract or a staker, `claim()` reverts for them. Staked SVO is
   unaffected: `unstake` moves only SVO. IMD earned by a blocked staker stays in the contract, counted as reserved, until the
   block is lifted: it is not redistributed and nobody can withdraw it. If the contract itself is blocked, later deposits are
-  frozen too while `notify()` keeps succeeding, so the refuel Safe should check `blocked(staking)` before sending surplus. The same key could already block the vault or the pool; that predates staking.
-- **The refuel Safe decides when the surplus is sent.** The vault is immutable and only the Safe can withdraw, so the
-  contract cannot pull Solomon's overflow. `/tokenomics` shows the surplus still waiting in the vault.
+  frozen too while `notify()` keeps succeeding, so the refuel Safe should check `blocked(staking)` before sending surplus
+  (`OverflowKeeper.sweep()` makes this check itself and reverts `Blocked`). The same key could already block the vault or the pool; that predates staking.
+- **The refuel Safe controls the overflow module.** The vault is immutable and only the Safe can withdraw, so this contract
+  cannot pull Solomon's overflow; the Safe's `OverflowKeeper` module lets anyone trigger the withdrawal of the reserve above
+  `full`. The Safe can disable it or raise `full` at any time (2-of-3). While it is enabled, moving the surplus needs no
+  signature and any overflow present is sweepable at once, including the moment the module is enabled; while it is disabled,
+  nothing moves. `/on-chain` shows both.
 - **The funder (a Safe) holds `reclaim()`** and the founder allocation until it is funded.
 - **Fund one matcher only.** The burn-match reads `token.totalBurned()`, which counts every transfer to DEAD, including
   another matcher's. Two funded `SvoStaking` contracts on the same SVO would match each other's burns and drain both
