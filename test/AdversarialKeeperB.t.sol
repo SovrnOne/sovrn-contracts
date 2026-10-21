@@ -73,6 +73,10 @@ contract GuardedMockSafe {
         enabled[m] = true;
     }
 
+    function isModuleEnabled(address m) external view returns (bool) {
+        return enabled[m];
+    }
+
     function setModuleGuard(address g) external {
         moduleGuard = g;
     }
@@ -186,10 +190,10 @@ contract AdversarialKeeperBTest is SystemBase {
         assertGt(staking.streamRemaining(), 44 ether, "the rolled-over week is streaming again");
     }
 
-    /// F2b (fixed): with the fold mirrored, the keeper sees that notify() would exceed MAX_STREAM and parks the IMD
-    /// instead of calling a notify() that reverts; the sweep itself succeeds. (deal() is a test cheat; real IMD supply
-    /// is nowhere near this.)
-    function test_F2b_staleUndistributedNearMaxStreamParksInsteadOfReverting() public {
+    /// F2b (fixed twice): with the fold mirrored the keeper sees that notify() would exceed MAX_STREAM; since IMD parked
+    /// above that bound could never be streamed again (swarm audit finding 4), the sweep refuses instead of forwarding.
+    /// (deal() is a test cheat; real IMD supply is nowhere near this.)
+    function test_F2b_nearMaxStreamTheSweepRefusesInsteadOfStranding() public {
         vm.prank(ALICE);
         staking.unstake(1_000_000 ether);
         deal(IMD_ADDR, address(staking), 0.95e40);
@@ -199,14 +203,14 @@ contract AdversarialKeeperBTest is SystemBase {
         vault.sync();
         uint256 over = keeper.overflow();
         assertGt(over, 0.06e40);
-        (,, uint256 toStakers, bool willNotify, bool ready) = keeper.preview();
-        assertTrue(ready);
-        assertFalse(willNotify, "keeper: added + folded 0.95e40 > MAX_STREAM");
+        (,,, bool willNotify, bool ready) = keeper.preview();
+        assertFalse(ready, "would strand above MAX_STREAM");
+        assertFalse(willNotify);
+        uint256 reserve = vault.inferenceReserve();
+        vm.expectRevert(OverflowKeeper.InvalidAmount.selector);
         keeper.sweep();
-        assertEq(staking.unnotified(), toStakers, "parked, not stuck");
-        assertEq(vault.inferenceReserve(), FULL);
-        vm.expectRevert(SvoStaking.InvalidAmount.selector);
-        staking.notify(); // and the staking contract agrees: it would not have taken it
+        assertEq(vault.inferenceReserve(), reserve, "nothing moved");
+        assertEq(staking.unnotified(), 0, "nothing parked");
     }
 
     // ================================================================ F3: MIN_SWEEP_FLOOR is quoted before the fee

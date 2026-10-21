@@ -16,6 +16,10 @@ contract MockSafe {
         enabled[m] = true;
     }
 
+    function isModuleEnabled(address m) external view returns (bool) {
+        return enabled[m];
+    }
+
     function disableModule(address m) external {
         enabled[m] = false;
     }

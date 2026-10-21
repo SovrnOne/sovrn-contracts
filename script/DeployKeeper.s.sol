@@ -10,12 +10,13 @@ import {OverflowKeeper} from "../src/OverflowKeeper.sol";
 ///
 ///   Deploy (any wallet can broadcast; the keeper has no owner):
 ///     forge script script/DeployKeeper.s.sol --sig "run()" --rpc-url $RPC --private-key $KEY --broadcast
-///   Then, from the refuel Safe (2-of-3), ONE transaction: Safe.enableModule(<keeper>). Until then sweep() reverts
-///   SafeCallFailed (the Safe answers GS104) and nothing can move. The Safe can disableModule() at any time.
+///   Then, from the refuel Safe (2-of-3), ONE transaction: Safe.enableModule(<keeper>). Until then sweep() reverts with
+///   the Safe's own "GS104" and preview().ready is false; nothing can move. The Safe can disableModule() at any time.
 ///
 ///   Settings are PINNED: full = 25 IMD (the app's LIFE_FORCE_FULL_WEI) and minSweep = 1 IMD, written in WEI
-///   (25 IMD is 25000000000000000000). A different value is taken only when ALLOW_OTHER_FULL / ALLOW_OTHER_MIN_SWEEP
-///   names that exact wei value, so a leftover rehearsal variable cannot apply by accident. Later changes are Safe
+///   (25 IMD is 25000000000000000000). To deploy another value set KEEPER_FULL / KEEPER_MIN_SWEEP to it AND
+///   ALLOW_OTHER_FULL / ALLOW_OTHER_MIN_SWEEP to the same wei value: the override must repeat the value it permits
+///   (the DeployStaking pattern), so one leftover rehearsal variable cannot apply by accident. Later changes are Safe
 ///   transactions (setFull / setMinSweep). Omit --broadcast for a dry run. A keeper deployed with wrong settings is
 ///   harmless until enabled: deploy again and enable the right one.
 contract DeployKeeper is Script {
@@ -34,9 +35,11 @@ contract DeployKeeper is Script {
         require(LifeForceVault(VAULT).REFUEL_SAFE() == SAFE, "vault's Safe is not the refuel Safe");
         require(LifeForceVault(VAULT).IMD() == IMD, "vault's IMD is not IMD");
         require(SvoStaking(STAKING).rewardToken() == IMD, "staking rewards a different token");
-        // The override must name the exact value it permits (the DeployStaking pattern), never a bare flag.
-        uint256 full = vm.envOr("ALLOW_OTHER_FULL", DEFAULT_FULL);
-        uint256 minSweep = vm.envOr("ALLOW_OTHER_MIN_SWEEP", DEFAULT_MIN_SWEEP);
+        // A non-default value needs a second variable that repeats it (the DeployStaking pattern), never a bare flag.
+        uint256 full = vm.envOr("KEEPER_FULL", DEFAULT_FULL);
+        uint256 minSweep = vm.envOr("KEEPER_MIN_SWEEP", DEFAULT_MIN_SWEEP);
+        if (full != DEFAULT_FULL) require(vm.envOr("ALLOW_OTHER_FULL", uint256(0)) == full, "KEEPER_FULL is not 25 IMD and ALLOW_OTHER_FULL does not repeat it");
+        if (minSweep != DEFAULT_MIN_SWEEP) require(vm.envOr("ALLOW_OTHER_MIN_SWEEP", uint256(0)) == minSweep, "KEEPER_MIN_SWEEP is not 1 IMD and ALLOW_OTHER_MIN_SWEEP does not repeat it");
         require(full >= 1 ether, "full is below 1 IMD: is it written in wei?");
         require(minSweep >= 1 ether / 10, "minSweep is below 0.1 IMD: is it written in wei?");
         require(full > minSweep, "full must be above minSweep (arguments swapped?)");

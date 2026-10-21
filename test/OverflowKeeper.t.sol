@@ -17,6 +17,10 @@ contract MockSafe {
         enabled[m] = true;
     }
 
+    function isModuleEnabled(address m) external view returns (bool) {
+        return enabled[m];
+    }
+
     function disableModule(address m) external {
         enabled[m] = false;
     }
@@ -198,6 +202,33 @@ contract OverflowKeeperTest is SystemBase {
         _fund(1 ether); // overflow 1.6 >= minSweep
         keeper.sweep();
         assertEq(vault.inferenceReserve(), FULL);
+    }
+
+    /// Swarm audit finding 1: the Safe may call sweep() itself. A fee to itself would break the "ends where it started"
+    /// invariant, so the Safe pays no fee and everything goes to stakers.
+    function test_safeItselfCanSweepAndPaysNoFee() public {
+        _fund(100 ether);
+        uint256 safeBefore = imd.balanceOf(SAFE);
+        vm.expectEmit(true, false, false, true, address(keeper));
+        emit Swept(SAFE, 45 ether, 45 ether, 0, true);
+        bytes memory ret = safe.callAs(address(keeper), abi.encodeCall(OverflowKeeper.sweep, ()));
+        (uint256 toStakers, uint256 fee) = abi.decode(ret, (uint256, uint256));
+        assertEq(fee, 0);
+        assertEq(toStakers, 45 ether);
+        assertEq(imd.balanceOf(SAFE), safeBefore);
+        assertEq(imd.balanceOf(address(staking)), 45 ether);
+        assertEq(vault.inferenceReserve(), FULL);
+    }
+
+    /// Swarm audit finding 2: preview().ready is false while the Safe has not enabled the module.
+    function test_previewNotReadyWhileModuleDisabled() public {
+        _fund(100 ether);
+        safe.disableModule(address(keeper));
+        (,,,, bool ready) = keeper.preview();
+        assertFalse(ready, "not enabled: sweep() would revert GS104");
+        safe.enableModule(address(keeper));
+        (,,,, ready) = keeper.preview();
+        assertTrue(ready);
     }
 
     function test_sweepRefusesWhenNotEnabledAndWorksOnceEnabled() public {

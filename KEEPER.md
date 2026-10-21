@@ -1,8 +1,8 @@
 # OverflowKeeper (Safe module for Solomon's overflow)
 
 `src/OverflowKeeper.sol` is a post-launch contract, like `SvoStaking` (`STAKING.md`). It is not part of the launch build in
-`launch-attestation.json`. **No audit is claimed**: three independent AI adversarial reviews (2026-10-20, see "Review notes")
-and 47 Foundry tests, no human audit.
+`launch-attestation.json`. **No audit is claimed**: three independent AI adversarial reviews plus one IMD swarm audit round
+(2026-10-20, see "Review notes") and 49 Foundry tests, no human audit.
 
 ## What it is
 The `LifeForceVault` is immutable and only `REFUEL_SAFE` (`0xEb57c52272B90F989C41B739e2ccc5f00bF7697C`, 2-of-3) can withdraw
@@ -16,10 +16,11 @@ every time, and twice it got stuck in the queue. The keeper is a **Safe module**
 | `x` | `vault.inferenceReserve() - full`, computed on chain at execution time; `withdrawInference` itself refuses more than the reserve |
 | `full` | 25 IMD at deploy (the app's `LIFE_FORCE_FULL_WEI`); `setFull`, Safe only |
 | `minSweep` | 1 IMD at deploy; `setMinSweep`, Safe only, floor `MIN_SWEEP_FLOOR` = 607,840 wei |
-| Caller fee | `FEE_BPS` = 50 (0.5%) of each sweep, to `msg.sender`, out of the withdrawn IMD |
+| Caller fee | `FEE_BPS` = 50 (0.5%) of each sweep, to `msg.sender`, out of the withdrawn IMD; the Safe itself may call `sweep()` and then pays no fee |
 | Safe float | enforced unchanged: the sweep reverts `SafeBalanceMismatch` unless exactly `x` arrived from the vault and the Safe ends with the IMD it started with (so a fee-on-transfer IMD, or a Safe reporting success for a failed call, cannot spend the Safe's own IMD) |
-| notify() | called only when SvoStaking will accept it (same checks mirrored, including emission that ran with nobody staked); otherwise the IMD waits in the staking contract and the next big enough sweep streams it. A sweep never reverts on the staking rules |
+| notify() | called only when SvoStaking will accept it (same checks mirrored, including emission that ran with nobody staked); otherwise the IMD waits in the staking contract and the next big enough sweep streams it. A sweep never reverts on the staking rules, with one bound: a sweep that would push the next stream over `MAX_STREAM` (1e40 wei, unreachable with real IMD) reverts `InvalidAmount` rather than park IMD that could never be streamed |
 | Blocklist | `sweep()` reverts `Blocked` and `preview().ready` is false when IMD's `blocked()` is set for the vault, the Safe or the staking contract (any non-zero answer counts; a missing function counts as not blocked) |
+| `preview().ready` | false whenever `sweep()` would revert: module not enabled on the Safe (`isModuleEnabled`), below `minSweep`, a blocked party, or the `MAX_STREAM` bound |
 | Owner / upgrade / tokens held | none / none / none |
 | Off switch | the Safe: `disableModule(prev, keeper)` (2-of-3), or `setFull(huge)` to pause without disabling |
 
@@ -41,10 +42,11 @@ Constructor args (vault, staking, full, minSweep), ABI-encoded for Etherscan (`c
 `0000000000000000000000002001318118e1b3df1e653e0999926bdaa48a5a52000000000000000000000000e8ebb026ff49f139abc50c3af64bdfebbf28f5330000000000000000000000000000000000000000000000015af1d78b58c400000000000000000000000000000000000000000000000000000de0b6b3a7640000`
 
 ## Runbook A: deploy and record
-1. In `~/sovrn-contracts` at a committed HEAD: `forge build`, `forge test --match-path 'test/*Keeper*'` (47 tests).
+1. In `~/sovrn-contracts` at a committed HEAD: `forge build`, `forge test --match-path 'test/*Keeper*'` (49 tests).
 2. Dry run: `forge script script/DeployKeeper.s.sol --sig "run()" --rpc-url https://rpc.mainnet.chain.robinhood.com` (no
    `--broadcast`). The log must show `full (wei) 25000000000000000000`, `minSweep (wei) 1000000000000000000` and NO
-   "WARNING: non-default settings" line; `env | grep ALLOW_OTHER` must be empty.
+   "WARNING: non-default settings" line; `env | grep -E 'KEEPER_|ALLOW_OTHER'` must be empty (a non-default value needs
+   both `KEEPER_FULL` and `ALLOW_OTHER_FULL` set to the same wei; one alone is refused).
 3. Broadcast from any funded EOA (the deployer gets no power): add `--private-key $KEY --broadcast`. The script reads the
    deployed settings back and reverts if they differ. Record the address, tx, block, commit from
    `broadcast/DeployKeeper.s.sol/4663/run-latest.json`.
@@ -76,7 +78,8 @@ What is signed: `to` = the Safe itself, `value` 0, operation Call, `data` = `cas
 3. Before the second signature, decode the data in the Safe UI: `to` equals the Safe, method `enableModule`, argument the
    keeper, operation Call, value 0.
 4. After execution: `isModuleEnabled(keeper)` = true; `getModulesPaginated(0x…01, 50)` lists only the keeper.
-5. First sweep under supervision: `preview()`, then `sweep()` from any wallet (gas only). Check the `Swept` log, vault
+5. First sweep under supervision: `preview()`, then `sweep()` from any wallet (gas only; from the Safe itself it works
+   too and pays no fee). Check the `Swept` log, vault
    `inferenceReserve()` == 25e18, staking `unnotified()`/`streamRemaining()` moved, the Safe's IMD unchanged, the caller got
    0.5%. Then set `OVERFLOW_KEEPER=<address>` on the VPS `.env.local` and restart (`./sovrn.sh restart`).
 
@@ -85,7 +88,8 @@ What is signed: `to` = the Safe itself, `value` 0, operation Call, `data` = `cas
 (`getModulesPaginated(0x0000000000000000000000000000000000000001, 50)`; the first entry's predecessor is the sentinel
 `0x…01`). With the keeper as the only module: `disableModule(0x0000000000000000000000000000000000000001, <keeper>)`,
 selector `0xe009cfde`, `to` = the Safe, value 0, Call. The Safe{Wallet} UI (Settings, Modules, Remove) computes
-`prevModule` itself; so does the admin page's Keeper card. Afterwards `sweep()` reverts `GS104`. There is no single-key kill
+`prevModule` itself; so does the admin page's Keeper card. Afterwards `sweep()` reverts `GS104` and `preview().ready` is
+false. There is no single-key kill
 switch; disabling is 2-of-3 like any Safe transaction. A cheaper pause is `setFull(<huge>)`, which makes `overflow()` 0.
 
 ## Runbook E: incident (module enabled, something is wrong)
@@ -111,4 +115,16 @@ identically, so the prediction is exact; (6) `preview().ready` ignored a blocked
 Deploy script: settings pinned with exact-value overrides only, wei-unit floors, read-back after broadcast. Found sound: the
 view/withdraw reserve math under shortfall and untracked IMD (fuzzed), fee linearity (no farming or timing edge), parked IMD is
 never stranded, atomicity against a hostile IMD, re-entrancy, Safe 1.5.0 return-data and GS104 semantics, module-guard veto,
-no delegatecall path, gas (~295k with notify, ~97k parked).
+no delegatecall path, gas (about 310k with notify, 110k parked, as measured by `test_sound_sweepGas`).
+
+2026-10-20, IMD swarm audit (template `audit`: four specialists and a judge; job `5fff9f74-06f9-4039-a489-d9c24b45c9df`,
+commit `90746ea`; report at `https://raw.githubusercontent.com/Identity-md/research/main/jobs/5fff9f74-06f9-4039-a489-d9c24b45c9df/files/AUDIT.md`).
+Result: 3 low, 3 info, no critical, high or medium. All six fixed before deployment: (1) the Safe calling `sweep()`
+itself always reverted (the fee was a Safe-to-Safe transfer, so the balance invariant failed): the Safe now pays no fee;
+(2) `preview().ready` was true while the module was not enabled, so a poller would send reverting sweeps: it now reads
+`isModuleEnabled`; (3) the deploy script's `ALLOW_OTHER_*` were plain overrides, not the exact-value confirmation the
+comment claimed: a non-default value now needs `KEEPER_*` and `ALLOW_OTHER_*` to agree; (4) IMD parked above `MAX_STREAM`
+could never be streamed again: a sweep that would cross the bound now reverts instead of forwarding, and `ready` says so;
+(5) stale test count and gas figures here; (6) the deploy script said a not-yet-enabled keeper reverts `SafeCallFailed`;
+it is the Safe's `GS104`. Acceptance by the swarm means the report met the job's checks, not that the code has no other
+defects.

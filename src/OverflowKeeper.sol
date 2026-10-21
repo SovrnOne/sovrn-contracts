@@ -10,6 +10,7 @@ interface ISafeModuleManager {
     function execTransactionFromModuleReturnData(address to, uint256 value, bytes calldata data, uint8 operation)
         external
         returns (bool success, bytes memory returnData);
+    function isModuleEnabled(address module) external view returns (bool);
 }
 
 /// @notice Keeper for Solomon's overflow: moves the vault's inference reserve above "full health" to SvoStaking in one
@@ -22,16 +23,19 @@ interface ISafeModuleManager {
 ///      module at any time (`disableModule`) and is the only party that can change `full` and `minSweep`.
 ///
 ///      Caller fee. Whoever calls `sweep()` receives FEE_BPS (0.5%) of the amount moved, paid by the Safe out of the
-///      withdrawn IMD; the rest goes to the staking contract. The fee is the gas and attention incentive; nothing else
+///      withdrawn IMD; the rest goes to the staking contract (when the Safe itself is the caller there is no fee: the
+///      whole amount goes to stakers). The fee is the gas and attention incentive; nothing else
 ///      ever leaves through this contract. The Safe's own IMD balance is unchanged by a sweep, and that is enforced:
 ///      the sweep checks that exactly `amount` arrived from the vault and that the Safe ends where it started, so a
 ///      token that skims a fee, or a Safe that reports success for a failed withdrawal, makes the sweep revert
 ///      instead of spending the Safe's float.
 ///
 ///      Never stuck. After the transfer the keeper calls `SvoStaking.notify()` only when it will succeed (something to
-///      add; while a stream runs, at least a tenth of what is left; within the contract's bounds). Otherwise the IMD
-///      waits in the staking contract, where it can only ever go to stakers, and the next sweep that meets the
-///      threshold streams it. A sweep therefore never reverts on the staking contract's rules.
+///      add; while a stream runs, at least a tenth of what is left; at least a week of wei). Otherwise the IMD waits in
+///      the staking contract, where it can only ever go to stakers, and the next sweep that meets the threshold streams
+///      it. The one bound that would strand parked IMD for good is SvoStaking's MAX_STREAM (1e40 wei, far above any
+///      real IMD amount): a sweep that would push the next stream over it reverts InvalidAmount instead of forwarding.
+///      A sweep therefore never reverts on the staking contract's rules except at that bound.
 ///
 ///      No owner, no upgrade, holds no tokens. If IMD ever blocks the staking contract the sweep refuses, so IMD is not
 ///      withdrawn into a Safe that cannot forward it.
@@ -110,9 +114,11 @@ contract OverflowKeeper is Guard {
         return reserve > full ? reserve - full : 0;
     }
 
-    /// @notice What `sweep()` would do now. `ready` is false when it would revert (below minSweep, or IMD blocks the
-    ///         vault, the Safe or the staking contract); `willNotify` says whether the stream starts or extends in the
-    ///         same call. A caller that IMD blocks still fails on its own fee transfer.
+    /// @notice What `sweep()` would do now. `ready` is false when it would revert (the Safe has not enabled this module,
+    ///         below minSweep, IMD blocks the vault, the Safe or the staking contract, or the stream would exceed
+    ///         MAX_STREAM); `willNotify` says whether the stream starts or extends in the same call. `fee` assumes a
+    ///         caller other than the Safe (the Safe pays itself no fee). A caller that IMD blocks still fails on its own
+    ///         fee transfer.
     function preview()
         external
         view
@@ -121,20 +127,25 @@ contract OverflowKeeper is Guard {
         amount = overflow();
         fee = amount * FEE_BPS / BPS;
         toStakers = amount - fee;
-        ready = amount >= minSweep && !_anyBlocked();
-        willNotify = ready && _notifyWouldPass(staking.unnotified() + toStakers);
+        uint256 added = staking.unnotified() + toStakers;
+        ready = amount >= minSweep && _enabled() && !_anyBlocked() && _streamTotal(added) <= staking.MAX_STREAM();
+        willNotify = ready && _notifyWouldPass(added);
     }
 
     // ---------------------------------------------------------------- the sweep (anyone)
 
     /// @notice Move the overflow to stakers: the Safe withdraws it from the vault, pays the caller FEE_BPS of it and
     ///         sends the rest to SvoStaking; then the stream is notified if the staking contract will accept it.
+    ///         The Safe may call this itself; it then pays no fee (a Safe-to-Safe transfer would be a no-op).
     function sweep() external nonReentrant returns (uint256 toStakers, uint256 fee) {
         uint256 amount = overflow();
         if (amount < minSweep) revert NothingToSweep();
         if (_anyBlocked()) revert Blocked();
-        fee = amount * FEE_BPS / BPS;
+        fee = msg.sender == SAFE ? 0 : amount * FEE_BPS / BPS;
         toStakers = amount - fee;
+        // Parked IMD can only ever be streamed by notify(), and notify() refuses a stream above MAX_STREAM for good:
+        // never forward what could not be streamed later.
+        if (_streamTotal(staking.unnotified() + toStakers) > staking.MAX_STREAM()) revert InvalidAmount();
 
         // 1. The Safe withdraws the overflow; the vault sends it to REFUEL_SAFE, i.e. the Safe itself. Exactly `amount`
         //    must arrive, or the Safe would be paying the difference out of its own IMD below.
@@ -159,11 +170,20 @@ contract OverflowKeeper is Guard {
     // ---------------------------------------------------------------- internals
 
     /// @dev Mirrors the checks in SvoStaking.notify() exactly, so a sweep never trips them. `added` = IMD at the
-    ///      staking contract above what it has reserved, which is what notify() would stream. notify() first folds
-    ///      emission that ran while nobody was staked into `undistributed`; the same fold is applied here.
+    ///      staking contract above what it has reserved, which is what notify() would stream.
     function _notifyWouldPass(uint256 added) private view returns (bool) {
         uint256 leftover = staking.streamRemaining();
         if (leftover != 0 && (added == 0 || added < leftover / 10)) return false;
+        uint256 total = _streamTotal(added);
+        if (total < staking.REWARD_PERIOD()) return false;
+        if (total > staking.MAX_STREAM()) return false;
+        return true;
+    }
+
+    /// @dev The stream notify() would set up for `added`: new IMD plus what is left of the current stream plus
+    ///      `undistributed`, including the emission that ran while nobody was staked which notify() first folds in
+    ///      (SvoStaking._updateGlobal); the same fold is applied here so the two agree to the wei.
+    function _streamTotal(uint256 added) private view returns (uint256) {
         uint256 undistributed = staking.undistributed();
         if (staking.totalStaked() == 0) {
             uint256 periodFinish = staking.periodFinish();
@@ -171,10 +191,13 @@ contract OverflowKeeper is Guard {
             uint256 lastUpdate = staking.lastUpdate();
             if (until > lastUpdate) undistributed += (until - lastUpdate) * staking.rewardRate();
         }
-        uint256 total = added + leftover + undistributed;
-        if (total < staking.REWARD_PERIOD()) return false;
-        if (total > staking.MAX_STREAM()) return false;
-        return true;
+        return added + staking.streamRemaining() + undistributed;
+    }
+
+    /// @dev Has the Safe enabled this module? Read tolerantly: a Safe that cannot answer counts as not enabled.
+    function _enabled() private view returns (bool) {
+        (bool ok, bytes memory data) = SAFE.staticcall(abi.encodeCall(ISafeModuleManager.isModuleEnabled, (address(this))));
+        return ok && data.length >= 32 && abi.decode(data, (uint256)) != 0;
     }
 
     /// @dev Any of the three parties a sweep moves IMD between on IMD's blocklist.
