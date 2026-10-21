@@ -44,7 +44,7 @@ Deployed on Robinhood Chain (4663) on 2026-10-21 from commit `b0022c1` (the swar
 `vault()`, `staking()`, `full()`, `minSweep()`, `FEE_BPS()` = 50, `MIN_SWEEP_FLOOR()` = 607,840 all as expected;
 `Safe.isModuleEnabled(keeper)` = false. Bytecode: the on-chain runtime (5,016 bytes) equals the local build of `b0022c1`
 except the 10 compiler-marked immutable slots (200 bytes), which decode to the vault and staking addresses above; nothing
-else differs. Source verified on Sourcify (see below for Etherscan).
+else differs. Source verified on Sourcify (full match) and on Etherscan (`https://robin.etherscan.io/address/0xb2c0A96C6AD46883F8aB3BCd399AEe71C60582D4#code`), both on 2026-10-21.
 
 **Not enabled.** The module does nothing until the refuel Safe runs `enableModule(0xb2c0A96C6AD46883F8aB3BCd399AEe71C60582D4)`
 (Runbook C). Record the enable transaction and date here when that happens.
