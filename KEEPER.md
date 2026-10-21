@@ -35,8 +35,19 @@ realistic caller. Each sweep that meets SvoStaking's one-tenth rule re-spreads w
 so with the keeper on the stream is in effect perpetual with a lag of up to 7 days; stakers lose nothing in total.
 
 ## Deployment
-Not deployed yet. Record here: address, deploy tx, block, commit, deployer, constructor args, the `enableModule` tx and date,
-the bytecode comparison, verification status.
+Deployed on Robinhood Chain (4663) on 2026-10-21 from commit `b0022c1` (the swarm-audit fixes on top of the audited
+`90746ea`): **`0xb2c0A96C6AD46883F8aB3BCd399AEe71C60582D4`** (tx
+`0xc1de93686dbfc7658abf295cf2c1f34ddf11e0032691e00eb431d6ed81ec1928`, block 93,853,600, 1,218,477 gas), deployed by
+`0x566d…4A92` (the IMD payer wallet; it has no power over the contract). Constructor: vault
+`0x2001318118e1B3DF1e653E0999926bdAa48A5A52`, staking `0xe8ebB026Ff49f139aBc50C3Af64bdFebbF28f533`, full
+`25000000000000000000` (25 IMD), minSweep `1000000000000000000` (1 IMD). Read back after deploy: `SAFE()`, `IMD()`,
+`vault()`, `staking()`, `full()`, `minSweep()`, `FEE_BPS()` = 50, `MIN_SWEEP_FLOOR()` = 607,840 all as expected;
+`Safe.isModuleEnabled(keeper)` = false. Bytecode: the on-chain runtime (5,016 bytes) equals the local build of `b0022c1`
+except the 10 compiler-marked immutable slots (200 bytes), which decode to the vault and staking addresses above; nothing
+else differs. Source verified on Sourcify (see below for Etherscan).
+
+**Not enabled.** The module does nothing until the refuel Safe runs `enableModule(0xb2c0A96C6AD46883F8aB3BCd399AEe71C60582D4)`
+(Runbook C). Record the enable transaction and date here when that happens.
 
 Constructor args (vault, staking, full, minSweep), ABI-encoded for Etherscan (`cast abi-encode "constructor(address,address,uint256,uint256)" 0x2001318118e1B3DF1e653E0999926bdAa48A5A52 0xe8ebB026Ff49f139aBc50C3Af64bdFebbF28f533 25000000000000000000 1000000000000000000`):
 `0000000000000000000000002001318118e1b3df1e653e0999926bdaa48a5a52000000000000000000000000e8ebb026ff49f139abc50c3af64bdfebbf28f5330000000000000000000000000000000000000000000000015af1d78b58c400000000000000000000000000000000000000000000000000000de0b6b3a7640000`
